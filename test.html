@@ -1,0 +1,1740 @@
+<!DOCTYPE html>
+<html lang="en">
+<!--
+    PRNG Visual Analyzer - Single File Version
+    
+    This is a monolithic single-file implementation containing all functionality:
+    - Complete React application with all components inline
+    - Web Worker code embedded as a blob
+    - All CSS styles inline
+    - Complete PRNG visualization engine with multiple modes
+    - Built-in generators and custom equation support
+    
+    For a modular version with separated files, see the other files in this repo:
+    - index.html (loader), App.js (main app), worker.js, styles.css, 
+      constants.js, and components/ directory
+-->
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PRNG Visual Analyzer</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Tailwind Config -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        lab: {
+                            900: '#0f172a',
+                            800: '#1e293b',
+                            700: '#334155',
+                            accent: '#38bdf8',
+                            danger: '#ef4444',
+                            success: '#22c55e'
+                        }
+                    },
+                    fontFamily: {
+                        mono: ['"Fira Code"', 'monospace']
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <style>
+        body { 
+            background-color: #0f172a; 
+            color: #e2e8f0; 
+            margin: 0;
+            overflow: hidden;
+        }
+        input[type="range"] { accent-color: #38bdf8; }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #38bdf8; }
+
+        .canvas-viewport {
+            overflow: hidden;
+            cursor: grab;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .canvas-viewport:active {
+            cursor: grabbing;
+        }
+        .canvas-wrapper {
+            transform-origin: center center;
+            image-rendering: pixelated;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // ==========================================
+        // WORKER CODE (Embedded as String)
+        // ==========================================
+        const workerScript = `
+            self.onmessage = function(e) {
+                const { equation, seed, resolution, mode, bitPlaneIndex, contrastStretch, useBuiltIn, builtInType } = e.data;
+                console.log('Worker received:', { equation, seed, resolution, mode, useBuiltIn, builtInType });
+                
+                try {
+                    let finalEquation = equation;
+                    if (useBuiltIn && builtInType) {
+                        finalEquation = builtInType;
+                    }
+                    
+                    const result = generateImage(finalEquation, seed, resolution, mode, bitPlaneIndex, contrastStretch, true);
+                    console.log('Worker finished, sending back result');
+                    self.postMessage({ success: true, buffer: result.buffer, stats: result.stats, resolution: resolution }, [result.buffer]);
+                } catch (err) {
+                    console.error('Worker error:', err);
+                    self.postMessage({ success: false, error: err.message });
+                }
+            };
+
+            function tokenize(eq) {
+                const cleanEq = eq.replace(/\\s+/g, '');
+                
+                const validPattern = /^[0-9a-fA-Fx+\\-*^&|~()<>]+$/;
+                if (!validPattern.test(cleanEq)) {
+                    const invalidChars = cleanEq.match(/[^0-9a-fA-Fx+\\-*^&|~()<>]/g);
+                    throw new Error(\`Invalid characters in equation: \${[...new Set(invalidChars)].join(', ')}. Only these are allowed: 0-9, x, +, -, *, ^, &, |, ~, <<, >>, (, )\`);
+                }
+                
+                const regex = /((?:0x[0-9a-fA-F]+)|\\d+)|(<<|>>)|([+\\-*^&|~()])|(x)/gi;
+                const tokens = [];
+                let match;
+                let lastIndex = 0;
+                
+                while ((match = regex.exec(cleanEq)) !== null) {
+                    if (match[1]) tokens.push({ type: 'NUM', value: parseInt(match[1]) });
+                    else if (match[2]) tokens.push({ type: 'OP', value: match[2] });
+                    else if (match[3]) tokens.push({ type: match[3] === '(' || match[3] === ')' ? 'PAREN' : 'OP', value: match[3] });
+                    else if (match[4]) tokens.push({ type: 'VAR', value: 'x' });
+                    lastIndex = regex.lastIndex;
+                }
+                
+                if (tokens.length === 0) {
+                    throw new Error('Empty or invalid equation');
+                }
+                
+                return tokens;
+            }
+
+            function toRPN(tokens) {
+                const outputQueue = [];
+                const opStack = [];
+                
+                const precedence = {
+                    '~': 6,
+                    '*': 5,
+                    '+': 4, '-': 4,
+                    '<<': 3, '>>': 3, 'ROL': 3, 'ROR': 3,
+                    '&': 2,
+                    '^': 1,
+                    '|': 0
+                };
+
+                tokens.forEach(token => {
+                    if (token.type === 'NUM' || token.type === 'VAR') {
+                        outputQueue.push(token);
+                    } else if (token.type === 'OP') {
+                        if (token.value === '~') {
+                            opStack.push(token);
+                        } else {
+                            while (
+                                opStack.length > 0 &&
+                                opStack[opStack.length - 1].type === 'OP' &&
+                                precedence[opStack[opStack.length - 1].value] >= precedence[token.value]
+                            ) {
+                                outputQueue.push(opStack.pop());
+                            }
+                            opStack.push(token);
+                        }
+                    } else if (token.value === '(') {
+                        opStack.push(token);
+                    } else if (token.value === ')') {
+                        while (opStack.length > 0 && opStack[opStack.length - 1].value !== '(') {
+                            outputQueue.push(opStack.pop());
+                        }
+                        if (opStack.length === 0) throw new Error("Mismatched parentheses");
+                        opStack.pop();
+                    }
+                });
+
+                while (opStack.length > 0) {
+                    const op = opStack.pop();
+                    if (op.value === '(') throw new Error("Mismatched parentheses");
+                    outputQueue.push(op);
+                }
+
+                return outputQueue;
+            }
+
+            function evaluateRPN(rpn, x_val) {
+                const stack = [];
+                const len = rpn.length;
+                
+                for (let i = 0; i < len; i++) {
+                    const token = rpn[i];
+                    const type = token.type;
+                    
+                    if (type === 'NUM') {
+                        stack.push(token.value);
+                    } else if (type === 'VAR') {
+                        stack.push(x_val);
+                    } else {
+                        const op = token.value;
+                        if (op === '~') {
+                            stack.push((~stack.pop()) >>> 0);
+                        } else {
+                            const b = stack.pop();
+                            const a = stack.pop();
+                            let res;
+                            
+                            if (op === '+') res = (a + b) | 0;
+                            else if (op === '-') res = (a - b) | 0;
+                            else if (op === '*') res = Math.imul(a, b);
+                            else if (op === '&') res = a & b;
+                            else if (op === '|') res = a | b;
+                            else if (op === '^') res = a ^ b;
+                            else if (op === '<<') res = a << (b & 31);
+                            else if (op === '>>') res = a >>> (b & 31);
+                            else if (op === 'ROL') res = (a << (b & 31)) | (a >>> (32 - (b & 31)));
+                            else if (op === 'ROR') res = (a >>> (b & 31)) | (a << (32 - (b & 31)));
+                            else throw new Error("Unknown operator: " + op);
+                            
+                            stack.push(res >>> 0);
+                        }
+                    }
+                }
+                
+                return stack[0];
+            }
+
+            function popcount(n) {
+                n = n - ((n >>> 1) & 0x55555555);
+                n = (n & 0x33333333) + ((n >>> 2) & 0x33333333);
+                return ((n + (n >>> 4) & 0xF0F0F0F) * 0x1010101) >>> 24;
+            }
+            
+            // Built-in Reference Generators (defined before generateImage)
+            function lcg(x) {
+                return ((x * 1664525) + 1013904223) >>> 0;
+            }
+            
+            function xorshift32(x) {
+                x ^= x << 13;
+                x ^= x >>> 17;
+                x ^= x << 5;
+                return x >>> 0;
+            }
+            
+            function splitmix(x) {
+                x = (x ^ (x >>> 30)) * 0xbf58476d1ce4e5b9;
+                x = (x ^ (x >>> 27)) * 0x94d049bb133111eb;
+                x = x ^ (x >>> 31);
+                return x >>> 0;
+            }
+            
+            function badGenerator1(x) {
+                return (x + 4) >>> 0;
+            }
+            
+            function badGenerator2(x) {
+                return (x * 2) >>> 0;
+            }
+
+            function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, onProgress) {
+                const totalPixels = res * res;
+                
+                // Check if using built-in generator
+                const builtInGenerators = {
+                    'lcg': lcg,
+                    'xorshift32': xorshift32,
+                    'splitmix': splitmix,
+                    'bad1': badGenerator1,
+                    'bad2': badGenerator2
+                };
+                
+                const isBuiltIn = builtInGenerators.hasOwnProperty(eqStr);
+                const generatorFunc = isBuiltIn ? builtInGenerators[eqStr] : null;
+                
+                let tokens, rpn;
+                if (!isBuiltIn) {
+                    if (/[/%]/.test(eqStr)) throw new Error("Division (/) and Modulo (%) are forbidden.");
+                    if (/[.]/.test(eqStr)) throw new Error("Floating points are forbidden.");
+                    
+                    tokens = tokenize(eqStr);
+                    rpn = toRPN(tokens);
+                }
+                
+                const buffer = new Uint8ClampedArray(totalPixels * 4);
+                const bitCounts = new Uint32Array(32);
+                const rawValues = new Uint32Array(totalPixels);
+                
+                let x = seed >>> 0;
+                let progressReportInterval = Math.floor(totalPixels / 100) || 1000;
+                
+                if (mode === 'pair') {
+                    const density = new Uint32Array(totalPixels);
+                    let maxHits = 0;
+                    
+                    for (let i = 0; i < totalPixels; i++) {
+                        x = isBuiltIn ? generatorFunc(x) : evaluateRPN(rpn, x);
+                        
+                        const px = (seed >>> 0) % res;
+                        const py = x % res;
+                        
+                        const idx = (py * res) + px;
+                        density[idx]++;
+                        if (density[idx] > maxHits) maxHits = density[idx];
+                        
+                        seed = x;
+                        
+                        if (onProgress && i % progressReportInterval === 0) {
+                            self.postMessage({ type: 'progress', progress: (i / totalPixels) * 100 });
+                        }
+                    }
+                    
+                    const invMaxHits = maxHits > 0 ? 255 / maxHits : 0;
+                    for (let i = 0; i < totalPixels; i++) {
+                        const val = (density[i] * invMaxHits) | 0;
+                        const pIdx = i << 2;
+                        buffer[pIdx] = val;
+                        buffer[pIdx + 1] = val;
+                        buffer[pIdx + 2] = val;
+                        buffer[pIdx + 3] = 255;
+                    }
+                    
+                    return { buffer: buffer.buffer, stats: { maxHits } };
+                } 
+                
+                else {
+                    let prev_x = x;
+                    const inv = 1 / 4294967296;
+                    let minVal = 255, maxVal = 0;
+                    
+                    // Fast path: single-pass when contrast stretch is disabled
+                    if (!contrastStretch || !contrastStretch.enabled) {
+                        for (let i = 0; i < totalPixels; i++) {
+                            x = isBuiltIn ? generatorFunc(x) : evaluateRPN(rpn, x);
+                            
+                            for (let bit = 0; bit < 32; bit++) {
+                                if ((x >>> bit) & 1) bitCounts[bit]++;
+                            }
+                            
+                            let gray = 0;
+                            
+                            if (mode === 'raw') {
+                                gray = (x * inv * 255) | 0;
+                            } 
+                            else if (mode === 'bit') {
+                                gray = ((x >>> bitPlaneIndex) & 1) * 255;
+                            } 
+                            else if (mode === 'hamming') {
+                                const weight = popcount(x);
+                                gray = ((weight * 255) / 32) | 0;
+                            } 
+                            else if (mode === 'transition') {
+                                const diff = x ^ prev_x;
+                                gray = (diff * inv * 255) | 0;
+                                prev_x = x;
+                            }
+                            
+                            const pIdx = i << 2;
+                            buffer[pIdx] = gray;
+                            buffer[pIdx + 1] = gray;
+                            buffer[pIdx + 2] = gray;
+                            buffer[pIdx + 3] = 255;
+                            
+                            if (gray < minVal) minVal = gray;
+                            if (gray > maxVal) maxVal = gray;
+                            
+                            if (onProgress && i % progressReportInterval === 0) {
+                                self.postMessage({ type: 'progress', progress: (i / totalPixels) * 100 });
+                            }
+                        }
+                    } 
+                    // Slow path: two-pass when contrast stretch is enabled
+                    else {
+                        // First pass: generate and store raw values
+                        for (let i = 0; i < totalPixels; i++) {
+                            x = isBuiltIn ? generatorFunc(x) : evaluateRPN(rpn, x);
+                            rawValues[i] = x;
+                            
+                            for (let bit = 0; bit < 32; bit++) {
+                                if ((x >>> bit) & 1) bitCounts[bit]++;
+                            }
+                            
+                            if (onProgress && i % progressReportInterval === 0) {
+                                self.postMessage({ type: 'progress', progress: (i / totalPixels) * 50 });
+                            }
+                        }
+                        
+                        // Second pass: compute grayscale values
+                        const tempGray = new Uint8Array(totalPixels);
+                        x = seed >>> 0;
+                        prev_x = x;
+                        
+                        for (let i = 0; i < totalPixels; i++) {
+                            x = rawValues[i];
+                            let gray = 0;
+                            
+                            if (mode === 'raw') {
+                                gray = (x * inv * 255) | 0;
+                            } 
+                            else if (mode === 'bit') {
+                                gray = ((x >>> bitPlaneIndex) & 1) * 255;
+                            } 
+                            else if (mode === 'hamming') {
+                                const weight = popcount(x);
+                                gray = ((weight * 255) / 32) | 0;
+                            } 
+                            else if (mode === 'transition') {
+                                const diff = x ^ prev_x;
+                                gray = (diff * inv * 255) | 0;
+                                prev_x = x;
+                            }
+                            
+                            tempGray[i] = gray;
+                            if (gray < minVal) minVal = gray;
+                            if (gray > maxVal) maxVal = gray;
+                            
+                            if (onProgress && i % progressReportInterval === 0) {
+                                self.postMessage({ type: 'progress', progress: 50 + (i / totalPixels) * 50 });
+                            }
+                        }
+                        
+                        // Apply contrast stretch
+                        const useMin = contrastStretch.auto ? minVal : contrastStretch.min;
+                        const useMax = contrastStretch.auto ? maxVal : contrastStretch.max;
+                        const range = useMax - useMin;
+                        
+                        if (range > 0) {
+                            for (let i = 0; i < totalPixels; i++) {
+                                const stretched = ((tempGray[i] - useMin) * 255) / range;
+                                const pIdx = i << 2;
+                                buffer[pIdx] = stretched | 0;
+                                buffer[pIdx + 1] = stretched | 0;
+                                buffer[pIdx + 2] = stretched | 0;
+                                buffer[pIdx + 3] = 255;
+                            }
+                        } else {
+                            for (let i = 0; i < totalPixels; i++) {
+                                const pIdx = i << 2;
+                                buffer[pIdx] = tempGray[i];
+                                buffer[pIdx + 1] = tempGray[i];
+                                buffer[pIdx + 2] = tempGray[i];
+                                buffer[pIdx + 3] = 255;
+                            }
+                        }
+                    }
+                    
+                    const bitStats = [];
+                    for (let bit = 0; bit < 32; bit++) {
+                        const proportion = bitCounts[bit] / totalPixels;
+                        const imbalance = Math.abs(0.5 - proportion);
+                        bitStats.push({ bit, proportion, imbalance });
+                    }
+                    
+                    if (onProgress) {
+                        self.postMessage({ type: 'progress', progress: 100 });
+                    }
+                    
+                    return { buffer: buffer.buffer, stats: { bitStats, minVal, maxVal } };
+                }
+            }
+        `;
+
+        const { useState, useEffect, useRef } = React;
+
+        function App() {
+            const [equation, setEquation] = useState("x ^ (x << 13)");
+            const [seed, setSeed] = useState(12345);
+            const [resolution, setResolution] = useState(256);
+            const [mode, setMode] = useState("raw");
+            const [bitIndex, setBitIndex] = useState(0);
+            const [isGenerating, setIsGenerating] = useState(false);
+            const [error, setError] = useState(null);
+            const [showSyntaxHelper, setShowSyntaxHelper] = useState(false);
+            const [bitStats, setBitStats] = useState(null);
+            const [showBitStats, setShowBitStats] = useState(false);
+            const [progress, setProgress] = useState(0);
+            const [contrastStretch, setContrastStretch] = useState({ enabled: false, auto: true, min: 0, max: 255 });
+            const [minMaxValues, setMinMaxValues] = useState({ min: 0, max: 255 });
+            const [sideBySideMode, setSideBySideMode] = useState(false);
+            const [leftConfig, setLeftConfig] = useState({ equation: '', seed: 0 });
+            const [rightConfig, setRightConfig] = useState({ equation: '', seed: 0 });
+            const [builtInGenerator, setBuiltInGenerator] = useState('');
+            const [showMenu, setShowMenu] = useState(false);
+            const [showModeDropdown, setShowModeDropdown] = useState(false);
+            const [showBuiltInDropdown, setShowBuiltInDropdown] = useState(false);
+            const [showPresetsDropdown, setShowPresetsDropdown] = useState(false);
+            const [showContrastDropdown, setShowContrastDropdown] = useState(false);
+            
+            // Split view per-panel states
+            const [leftPanel, setLeftPanel] = useState({
+                equation: "x ^ (x << 13)",
+                seed: 12345,
+                resolution: 256,
+                mode: "raw",
+                bitIndex: 0,
+                builtInGenerator: '',
+                contrastStretch: { enabled: false, auto: true, min: 0, max: 255 },
+                scale: 1,
+                pan: { x: 0, y: 0 },
+                showMenu: false,
+                showModeMenu: false,
+                showBuiltInMenu: false,
+                showPresetsMenu: false,
+                showContrastMenu: false,
+                isGenerating: false
+            });
+            
+            const [rightPanel, setRightPanel] = useState({
+                equation: "x ^ (x << 13)",
+                seed: 12346,
+                resolution: 256,
+                mode: "raw",
+                bitIndex: 0,
+                builtInGenerator: '',
+                contrastStretch: { enabled: false, auto: true, min: 0, max: 255 },
+                scale: 1,
+                pan: { x: 0, y: 0 },
+                showMenu: false,
+                showModeMenu: false,
+                showBuiltInMenu: false,
+                showPresetsMenu: false,
+                showContrastMenu: false,
+                isGenerating: false
+            });
+            
+            const [activePanel, setActivePanel] = useState('left');
+            
+            const [scale, setScale] = useState(1);
+            const [pan, setPan] = useState({ x: 0, y: 0 });
+            const [isDragging, setIsDragging] = useState(false);
+            const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+            
+            const canvasRef = useRef(null);
+            const canvasLeftRef = useRef(null);
+            const canvasRightRef = useRef(null);
+            const workerRef = useRef(null);
+            const workerLeftRef = useRef(null);
+            const workerRightRef = useRef(null);
+            const viewportRef = useRef(null);
+            const textareaRef = useRef(null);
+
+            const presets = [
+                { name: "LCG", code: "(x * 1664525) + 1013904223" },
+                { name: "Xorshift32", code: "x ^ (x << 13)" },
+                { name: "Xorshift with ROL", code: "x ^ (x ROL 13)" },
+                { name: "Counter", code: "x + 1" },
+                { name: "Bad (Low Bits)", code: "x + 4" },
+                { name: "Complex Mix", code: "(x ^ (x >> 15)) * (x | 0x55555555)" }
+            ];
+            
+            const builtInGenerators = [
+                { name: "LCG", type: "lcg", description: "Linear Congruential Generator" },
+                { name: "Xorshift32", type: "xorshift32", description: "Fast XOR-shift based generator" },
+                { name: "SplitMix", type: "splitmix", description: "High-quality hash-based generator" },
+                { name: "Bad: +4", type: "bad1", description: "Intentionally poor: x+4" },
+                { name: "Bad: x2", type: "bad2", description: "Intentionally poor: x*2" }
+            ];
+
+            const modes = [
+                { id: 'raw', label: 'Raw Value' },
+                { id: 'bit', label: 'Bit Plane' },
+                { id: 'hamming', label: 'Hamming Weight' },
+                { id: 'pair', label: 'Successive Pair' },
+                { id: 'transition', label: 'Transition' },
+            ];
+
+            // -- Initialize Worker --
+            useEffect(() => {
+                const blob = new Blob([workerScript], { type: "application/javascript" });
+                workerRef.current = new Worker(URL.createObjectURL(blob));
+                workerLeftRef.current = new Worker(URL.createObjectURL(blob));
+                workerRightRef.current = new Worker(URL.createObjectURL(blob));
+
+                const handleMessage = (e, isLeft = null) => {
+                    console.log('Main thread received from worker:', e.data);
+                    const { type, success, buffer, error, resolution: workerResolution, stats, progress: progressValue } = e.data;
+                    
+                    if (type === 'progress') {
+                        setProgress(progressValue);
+                        return;
+                    }
+                    
+                    if (success) {
+                        console.log('Drawing to canvas, buffer size:', buffer.byteLength, 'resolution:', workerResolution);
+                        if (sideBySideMode) {
+                            if (isLeft) {
+                                drawBufferToCanvas(buffer, workerResolution, canvasLeftRef.current, leftPanel.scale, leftPanel.pan);
+                                setLeftPanel(prev => ({ ...prev, isGenerating: false }));
+                            } else {
+                                drawBufferToCanvas(buffer, workerResolution, canvasRightRef.current, rightPanel.scale, rightPanel.pan);
+                                setRightPanel(prev => ({ ...prev, isGenerating: false }));
+                            }
+                        } else {
+                            drawBufferToCanvas(buffer, workerResolution);
+                            setIsGenerating(false);
+                        }
+                        
+                        if (stats && stats.bitStats) {
+                            setBitStats(stats.bitStats);
+                        }
+                        if (stats && stats.minVal !== undefined) {
+                            setMinMaxValues({ min: stats.minVal, max: stats.maxVal });
+                        }
+                        setError(null);
+                    } else {
+                        console.error('Worker returned error:', error);
+                        setError(error);
+                        if (sideBySideMode) {
+                            if (isLeft) {
+                                setLeftPanel(prev => ({ ...prev, isGenerating: false }));
+                            } else {
+                                setRightPanel(prev => ({ ...prev, isGenerating: false }));
+                            }
+                        } else {
+                            setIsGenerating(false);
+                        }
+                    }
+                    setProgress(0);
+                };
+                
+                workerRef.current.onmessage = (e) => handleMessage(e);
+                workerLeftRef.current.onmessage = (e) => handleMessage(e, true);
+                workerRightRef.current.onmessage = (e) => handleMessage(e, false);
+
+                return () => {
+                    workerRef.current.terminate();
+                    workerLeftRef.current.terminate();
+                    workerRightRef.current.terminate();
+                };
+            }, [sideBySideMode]);
+            
+            // Redraw canvases when scale/pan changes
+            useEffect(() => {
+                if (sideBySideMode && canvasLeftRef.current) {
+                    const canvas = canvasLeftRef.current;
+                    if (canvas.width > 0 && canvas.parentElement) {
+                        const container = canvas.parentElement;
+                        const containerWidth = container.clientWidth;
+                        const containerHeight = container.clientHeight;
+                        
+                        const scaledWidth = canvas.width * leftPanel.scale;
+                        const scaledHeight = canvas.height * leftPanel.scale;
+                        
+                        canvas.style.position = 'absolute';
+                        canvas.style.left = `${(containerWidth - scaledWidth) / 2 + leftPanel.pan.x}px`;
+                        canvas.style.top = `${(containerHeight - scaledHeight) / 2 + leftPanel.pan.y}px`;
+                        canvas.style.width = `${scaledWidth}px`;
+                        canvas.style.height = `${scaledHeight}px`;
+                    }
+                }
+            }, [leftPanel.scale, leftPanel.pan, sideBySideMode]);
+            
+            useEffect(() => {
+                if (sideBySideMode && canvasRightRef.current) {
+                    const canvas = canvasRightRef.current;
+                    if (canvas.width > 0 && canvas.parentElement) {
+                        const container = canvas.parentElement;
+                        const containerWidth = container.clientWidth;
+                        const containerHeight = container.clientHeight;
+                        
+                        const scaledWidth = canvas.width * rightPanel.scale;
+                        const scaledHeight = canvas.height * rightPanel.scale;
+                        
+                        canvas.style.position = 'absolute';
+                        canvas.style.left = `${(containerWidth - scaledWidth) / 2 + rightPanel.pan.x}px`;
+                        canvas.style.top = `${(containerHeight - scaledHeight) / 2 + rightPanel.pan.y}px`;
+                        canvas.style.width = `${scaledWidth}px`;
+                        canvas.style.height = `${scaledHeight}px`;
+                    }
+                }
+            }, [rightPanel.scale, rightPanel.pan, sideBySideMode]);
+
+            const drawBufferToCanvas = (buffer, res, targetCanvas = null, panelScale = 1, panelPan = { x: 0, y: 0 }) => {
+                const canvas = targetCanvas || canvasRef.current;
+                if (!canvas) return;
+                
+                console.log('Setting canvas size to:', res, 'x', res);
+                if (canvas.width !== res) canvas.width = res;
+                if (canvas.height !== res) canvas.height = res;
+
+                const ctx = canvas.getContext("2d");
+                const imgData = new ImageData(new Uint8ClampedArray(buffer), res, res);
+                ctx.putImageData(imgData, 0, 0);
+                
+                // Center and scale the canvas
+                if (targetCanvas && canvas.parentElement) {
+                    const container = canvas.parentElement;
+                    const containerWidth = container.clientWidth;
+                    const containerHeight = container.clientHeight;
+                    
+                    const scaledWidth = res * panelScale;
+                    const scaledHeight = res * panelScale;
+                    
+                    // Center the canvas
+                    canvas.style.position = 'absolute';
+                    canvas.style.left = `${(containerWidth - scaledWidth) / 2 + panelPan.x}px`;
+                    canvas.style.top = `${(containerHeight - scaledHeight) / 2 + panelPan.y}px`;
+                    canvas.style.width = `${scaledWidth}px`;
+                    canvas.style.height = `${scaledHeight}px`;
+                }
+            };
+
+            const handleRun = () => {
+                console.log('handleRun called');
+                setIsGenerating(true);
+                setError(null);
+                setProgress(0);
+                
+                if (sideBySideMode) {
+                    const messageLeft = {
+                        equation: leftConfig.equation,
+                        seed: parseInt(leftConfig.seed),
+                        resolution: parseInt(resolution),
+                        mode,
+                        bitPlaneIndex: parseInt(bitIndex),
+                        contrastStretch
+                    };
+                    const messageRight = {
+                        equation: rightConfig.equation,
+                        seed: parseInt(rightConfig.seed),
+                        resolution: parseInt(resolution),
+                        mode,
+                        bitPlaneIndex: parseInt(bitIndex),
+                        contrastStretch
+                    };
+                    workerLeftRef.current.postMessage(messageLeft);
+                    workerRightRef.current.postMessage(messageRight);
+                } else {
+                    const message = {
+                        equation,
+                        seed: parseInt(seed),
+                        resolution: parseInt(resolution),
+                        mode,
+                        bitPlaneIndex: parseInt(bitIndex),
+                        contrastStretch,
+                        useBuiltIn: !!builtInGenerator,
+                        builtInType: builtInGenerator
+                    };
+                    console.log('Sending to worker:', message);
+                    workerRef.current.postMessage(message);
+                }
+            };
+
+            const handleRandomSeed = () => {
+                const array = new Uint32Array(1);
+                crypto.getRandomValues(array);
+                setSeed(array[0]);
+            };
+
+            const insertSymbol = (symbol) => {
+                const textarea = textareaRef.current;
+                if (!textarea) return;
+                
+                const start = textarea.selectionStart;
+                const end = textarea.selectionEnd;
+                const text = equation;
+                const before = text.substring(0, start);
+                const after = text.substring(end);
+                
+                const newText = before + symbol + after;
+                setEquation(newText);
+                
+                setTimeout(() => {
+                    textarea.focus();
+                    textarea.setSelectionRange(start + symbol.length, start + symbol.length);
+                }, 0);
+            };
+
+            const handleWheel = (e) => {
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                const newScale = Math.max(0.1, Math.min(scale * delta, 10));
+                setScale(newScale);
+            };
+
+            const handleMouseDown = (e) => {
+                setIsDragging(true);
+                setDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+            };
+
+            const handleMouseMove = (e) => {
+                if (!isDragging) return;
+                setPan({
+                    x: e.clientX - dragStart.x,
+                    y: e.clientY - dragStart.y
+                });
+            };
+
+            const handleMouseUp = () => {
+                setIsDragging(false);
+            };
+
+            const resetView = () => {
+                setScale(1);
+                setPan({ x: 0, y: 0 });
+            };
+
+            const handleExportConfig = () => {
+                const config = {
+                    equation,
+                    seed: parseInt(seed),
+                    resolution: parseInt(resolution),
+                    mode,
+                    bitIndex: parseInt(bitIndex),
+                    timestamp: new Date().toISOString()
+                };
+                
+                const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
+                const link = document.createElement('a');
+                link.download = `prng_config_${Date.now()}.json`;
+                link.href = URL.createObjectURL(blob);
+                link.click();
+            };
+
+            const handleImportConfig = () => {
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.json';
+                input.onchange = (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        try {
+                            const config = JSON.parse(event.target.result);
+                            
+                            if (config.equation !== undefined) setEquation(config.equation);
+                            if (config.seed !== undefined) setSeed(config.seed);
+                            if (config.resolution !== undefined) setResolution(config.resolution);
+                            if (config.mode !== undefined) setMode(config.mode);
+                            if (config.bitIndex !== undefined) setBitIndex(config.bitIndex);
+                            
+                            setError(null);
+                            alert('Configuration loaded successfully!');
+                        } catch (err) {
+                            setError('Failed to load configuration: ' + err.message);
+                        }
+                    };
+                    reader.readAsText(file);
+                };
+                input.click();
+            };
+            
+            // Panel-specific handlers
+            // Helper to update panel state
+            const updatePanelState = (panelSide, updates) => {
+                if (panelSide === 'left') {
+                    setLeftPanel(prev => ({ ...prev, ...updates }));
+                } else {
+                    setRightPanel(prev => ({ ...prev, ...updates }));
+                }
+            };
+            
+            const handlePanelGenerate = (panelSide) => {
+                const panel = panelSide === 'left' ? leftPanel : rightPanel;
+                const worker = panelSide === 'left' ? workerLeftRef.current : workerRightRef.current;
+                
+                updatePanelState(panelSide, { isGenerating: true });
+                
+                const message = {
+                    equation: panel.equation,
+                    seed: parseInt(panel.seed),
+                    resolution: parseInt(panel.resolution),
+                    mode: panel.mode,
+                    bitPlaneIndex: parseInt(panel.bitIndex),
+                    contrastStretch: panel.contrastStretch,
+                    useBuiltIn: !!panel.builtInGenerator,
+                    builtInType: panel.builtInGenerator
+                };
+                
+                worker.postMessage(message);
+            };
+            
+            const handlePanelWheel = (e, panelSide) => {
+                e.preventDefault();
+                const panel = panelSide === 'left' ? leftPanel : rightPanel;
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                const newScale = Math.max(0.1, Math.min(panel.scale * delta, 10));
+                updatePanelState(panelSide, { scale: newScale });
+            };
+            
+            // Render a single panel for split view
+            const renderPanel = (panelSide) => {
+                const panel = panelSide === 'left' ? leftPanel : rightPanel;
+                const canvasRef = panelSide === 'left' ? canvasLeftRef : canvasRightRef;
+                
+                return (
+                    <div 
+                        className="flex-1 flex flex-col bg-lab-900"
+                        onMouseEnter={() => setActivePanel(panelSide)}
+                        onWheel={(e) => handlePanelWheel(e, panelSide)}
+                    >
+                        {/* Panel Header */}
+                        <div className="bg-lab-800 border-b border-lab-700 px-4 py-2 flex items-center gap-3">
+                            {/* Menu Button */}
+                            <div className="relative">
+                                <button 
+                                    onClick={() => updatePanelState(panelSide, { showMenu: !panel.showMenu })}
+                                    className="p-1.5 bg-lab-700 hover:bg-lab-600 rounded transition-colors"
+                                >
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                                    </svg>
+                                </button>
+                                
+                                {panel.showMenu && (
+                                    <div className="absolute top-full left-0 mt-1 w-72 bg-lab-900 border border-lab-700 rounded shadow-xl z-50 p-3 space-y-3 max-h-[70vh] overflow-y-auto">
+                                        <button 
+                                            onClick={() => updatePanelState(panelSide, { showMenu: false })}
+                                            className="absolute top-1 right-1 px-2 py-1 hover:bg-lab-700 rounded text-xs"
+                                        >
+                                            ✕
+                                        </button>
+                                        
+                                        <div className="text-xs font-bold text-lab-accent pt-4">{panelSide.toUpperCase()} Panel Menu</div>
+                                        
+                                        {/* Mode Dropdown */}
+                                        <div>
+                                            <button
+                                                onClick={() => updatePanelState(panelSide, { showModeMenu: !panel.showModeMenu })}
+                                                className="w-full px-2 py-1.5 bg-lab-800 hover:bg-lab-700 rounded text-xs flex items-center justify-between"
+                                            >
+                                                <span>Mode: {modes.find(m => m.id === panel.mode)?.label}</span>
+                                                <span>{panel.showModeMenu ? '▲' : '▼'}</span>
+                                            </button>
+                                            {panel.showModeMenu && (
+                                                <div className="mt-1 space-y-1 pl-2">
+                                                    {modes.map((m) => (
+                                                        <button 
+                                                            key={m.id}
+                                                            onClick={() => {
+                                                                updatePanelState(panelSide, { mode: m.id, showModeMenu: false });
+                                                            }}
+                                                            className={`w-full px-2 py-1 text-left text-xs rounded ${
+                                                                panel.mode === m.id ? 'bg-lab-accent text-lab-900' : 'bg-lab-800 hover:bg-lab-700'
+                                                            }`}
+                                                        >
+                                                            {m.label}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                        
+                                        {/* Built-in Generators */}
+                                        <div>
+                                            <button
+                                                onClick={() => updatePanelState(panelSide, { showBuiltInMenu: !panel.showBuiltInMenu })}
+                                                className="w-full px-2 py-1.5 bg-lab-800 hover:bg-lab-700 rounded text-xs flex items-center justify-between"
+                                            >
+                                                <span>
+                                                    {panel.builtInGenerator 
+                                                        ? `Built-In: ${builtInGenerators.find(g => g.type === panel.builtInGenerator)?.name}` 
+                                                        : 'Built-In: Custom'}
+                                                </span>
+                                                <span>{panel.showBuiltInMenu ? '▲' : '▼'}</span>
+                                            </button>
+                                            {panel.showBuiltInMenu && (
+                                                <div className="mt-1 space-y-1 pl-2">
+                                                    <button 
+                                                        onClick={() => {
+                                                            updatePanelState(panelSide, { builtInGenerator: '', showBuiltInMenu: false });
+                                                        }}
+                                                        className={`w-full px-2 py-1 text-left text-xs rounded ${
+                                                            !panel.builtInGenerator ? 'bg-lab-accent text-lab-900' : 'bg-lab-800 hover:bg-lab-700'
+                                                        }`}
+                                                    >
+                                                        Use Custom
+                                                    </button>
+                                                    {builtInGenerators.map((g) => (
+                                                        <button 
+                                                            key={g.type}
+                                                            onClick={() => {
+                                                                updatePanelState(panelSide, { builtInGenerator: g.type, showBuiltInMenu: false });
+                                                            }}
+                                                            className={`w-full px-2 py-1 text-left text-xs rounded ${
+                                                                panel.builtInGenerator === g.type ? 'bg-lab-accent text-lab-900' : 'bg-lab-800 hover:bg-lab-700'
+                                                            }`}
+                                                        >
+                                                            <div className="font-semibold">{g.name}</div>
+                                                            <div className="text-[10px] text-gray-500">{g.description}</div>
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                        
+                                        {/* Presets */}
+                                        <div>
+                                            <button
+                                                onClick={() => updatePanelState(panelSide, { showPresetsMenu: !panel.showPresetsMenu })}
+                                                className="w-full px-2 py-1.5 bg-lab-800 hover:bg-lab-700 rounded text-xs flex items-center justify-between"
+                                            >
+                                                <span>Presets</span>
+                                                <span>{panel.showPresetsMenu ? '▲' : '▼'}</span>
+                                            </button>
+                                            {panel.showPresetsMenu && (
+                                                <div className="mt-1 space-y-1 pl-2">
+                                                    {presets.map((p) => (
+                                                        <button 
+                                                            key={p.name}
+                                                            onClick={() => {
+                                                                updatePanelState(panelSide, { equation: p.code, showPresetsMenu: false });
+                                                            }}
+                                                            className="w-full px-2 py-1 text-left text-xs bg-lab-800 hover:bg-lab-700 rounded"
+                                                        >
+                                                            {p.name}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                        
+                                        {/* Contrast Stretch */}
+                                        <div>
+                                            <button
+                                                onClick={() => updatePanelState(panelSide, { showContrastMenu: !panel.showContrastMenu })}
+                                                className="w-full px-2 py-1.5 bg-lab-800 hover:bg-lab-700 rounded text-xs flex items-center justify-between"
+                                            >
+                                                <span>Contrast {panel.contrastStretch.enabled ? '✓' : ''}</span>
+                                                <span>{panel.showContrastMenu ? '▲' : '▼'}</span>
+                                            </button>
+                                            {panel.showContrastMenu && (
+                                                <div className="mt-1 bg-lab-800 rounded p-2">
+                                                    <div className="text-[10px] text-yellow-400 mb-2 font-bold">⚠️ VISUAL AID</div>
+                                                    <label className="flex items-center gap-2 mb-2">
+                                                        <input 
+                                                            type="checkbox" 
+                                                            checked={panel.contrastStretch.enabled}
+                                                            onChange={(e) => updatePanelState(panelSide, { 
+                                                                contrastStretch: {...panel.contrastStretch, enabled: e.target.checked}
+                                                            })}
+                                                            className="w-3 h-3"
+                                                        />
+                                                        <span className="text-xs">Enable</span>
+                                                    </label>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                            
+                            {/* Equation */}
+                            <input
+                                type="text"
+                                value={panel.equation}
+                                onChange={(e) => updatePanelState(panelSide, { equation: e.target.value })}
+                                className="flex-1 bg-lab-900 border border-lab-700 rounded px-2 py-1 font-mono text-xs text-green-400 focus:outline-none focus:border-lab-accent"
+                                placeholder="e.g. x ^ (x << 13)"
+                            />
+                            
+                            {/* Seed */}
+                            <input 
+                                type="number" 
+                                value={panel.seed}
+                                onChange={(e) => updatePanelState(panelSide, { seed: e.target.value })}
+                                className="w-24 bg-lab-900 border border-lab-700 rounded px-2 py-1 font-mono text-xs"
+                                placeholder="Seed"
+                            />
+                            
+                            {/* Resolution */}
+                            <select 
+                                value={panel.resolution}
+                                onChange={(e) => updatePanelState(panelSide, { resolution: parseInt(e.target.value) })}
+                                className="bg-lab-900 border border-lab-700 rounded px-2 py-1 font-mono text-xs"
+                            >
+                                <option value="256">256</option>
+                                <option value="512">512</option>
+                                <option value="1024">1024</option>
+                            </select>
+                            
+                            {/* Generate Button */}
+                            <button 
+                                onClick={() => handlePanelGenerate(panelSide)}
+                                disabled={panel.isGenerating}
+                                className={`px-3 py-1 rounded text-xs font-bold uppercase ${
+                                    panel.isGenerating 
+                                    ? 'bg-lab-700 text-gray-500 cursor-not-allowed' 
+                                    : 'bg-lab-accent text-lab-900 hover:bg-white'
+                                }`}
+                            >
+                                {panel.isGenerating ? 'Gen...' : 'Generate'}
+                            </button>
+                        </div>
+                        
+                        {/* Canvas Area */}
+                        <div className="flex-1 relative bg-black">
+                            <canvas 
+                                ref={canvasRef}
+                                style={{ imageRendering: 'pixelated', display: 'block', margin: 'auto' }}
+                            />
+                            
+                            {/* Zoom Controls */}
+                            <div className="absolute bottom-4 right-4 flex flex-col gap-1 bg-lab-800/80 backdrop-blur border border-lab-700 rounded p-1">
+                                <button 
+                                    onClick={() => updatePanelState(panelSide, { scale: Math.min(panel.scale * 1.2, 10) })}
+                                    className="px-2 py-0.5 bg-lab-700 hover:bg-lab-600 rounded text-xs"
+                                >
+                                    +
+                                </button>
+                                <div className="text-[10px] text-center text-gray-400">{Math.round(panel.scale * 100)}%</div>
+                                <button 
+                                    onClick={() => updatePanelState(panelSide, { scale: Math.max(panel.scale / 1.2, 0.1) })}
+                                    className="px-2 py-0.5 bg-lab-700 hover:bg-lab-600 rounded text-xs"
+                                >
+                                    −
+                                </button>
+                                <button 
+                                    onClick={() => updatePanelState(panelSide, { scale: 1, pan: { x: 0, y: 0 } })}
+                                    className="px-2 py-0.5 bg-lab-700 hover:bg-lab-600 rounded text-[10px] mt-1"
+                                >
+                                    Reset
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            return (
+                <div className="flex flex-col h-screen">
+                    {sideBySideMode ? (
+                        // Split View Mode
+                        <div className="flex h-screen">
+                            {renderPanel('left')}
+                            <div className="w-0.5 bg-lab-accent"></div>
+                            {renderPanel('right')}
+                        </div>
+                    ) : (
+                        // Single View Mode
+                        <>
+                    {/* TOP BAR */}
+                    <header className="bg-lab-800 border-b border-lab-700 px-6 py-3 pb-10 flex items-center gap-4 shadow-lg">
+                        {/* Menu Button */}
+                        <div className="relative">
+                            <button 
+                                onClick={() => setShowMenu(!showMenu)}
+                                className="p-2 bg-lab-700 hover:bg-lab-600 rounded transition-colors"
+                                title="Menu"
+                            >
+                                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                                </svg>
+                            </button>
+                            
+                            {/* Dropdown Menu */}
+                            {showMenu && (
+                                <div className="absolute top-full left-0 mt-2 w-80 bg-lab-900 border border-lab-700 rounded shadow-2xl z-50 p-4 space-y-4">
+                                    <button 
+                                        onClick={() => setShowMenu(false)}
+                                        className="absolute top-2 right-2 px-2 py-1 hover:bg-lab-700 rounded text-xs"
+                                    >
+                                        ✕
+                                    </button>
+                                    
+                                    <div className="text-sm font-bold text-lab-accent mb-3 pt-4">PRNG Visual Lab Menu</div>
+                                    
+                                    {/* Visualization Mode */}
+                                    <div>
+                                        <button
+                                            onClick={() => setShowModeDropdown(!showModeDropdown)}
+                                            className="w-full px-3 py-2 bg-lab-800 hover:bg-lab-700 rounded text-sm flex items-center justify-between transition-colors"
+                                        >
+                                            <span>Mode: {modes.find(m => m.id === mode)?.label}</span>
+                                            <span>{showModeDropdown ? '▲' : '▼'}</span>
+                                        </button>
+                                        {showModeDropdown && (
+                                            <div className="mt-2 space-y-1 pl-2">
+                                                {modes.map((m) => (
+                                                    <button 
+                                                        key={m.id}
+                                                        onClick={() => {
+                                                            setMode(m.id);
+                                                            setShowModeDropdown(false);
+                                                        }}
+                                                        className={`w-full px-3 py-2 text-left text-sm rounded transition-colors ${
+                                                            mode === m.id ? 'bg-lab-accent text-lab-900' : 'bg-lab-800 hover:bg-lab-700'
+                                                        }`}
+                                                    >
+                                                        {m.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                    
+                                    {/* Built-in Generators */}
+                                    <div>
+                                        <button
+                                            onClick={() => setShowBuiltInDropdown(!showBuiltInDropdown)}
+                                            className="w-full px-3 py-2 bg-lab-800 hover:bg-lab-700 rounded text-sm flex items-center justify-between transition-colors"
+                                        >
+                                            <span>
+                                                {builtInGenerator 
+                                                    ? `Built-In: ${builtInGenerators.find(g => g.type === builtInGenerator)?.name}` 
+                                                    : 'Built-In: Custom'}
+                                            </span>
+                                            <span>{showBuiltInDropdown ? '▲' : '▼'}</span>
+                                        </button>
+                                        {showBuiltInDropdown && (
+                                            <div className="mt-2 space-y-1 pl-2">
+                                                <button 
+                                                    onClick={() => {
+                                                        setBuiltInGenerator('');
+                                                        setShowBuiltInDropdown(false);
+                                                    }}
+                                                    className={`w-full px-3 py-2 text-left text-sm rounded transition-colors ${
+                                                        !builtInGenerator ? 'bg-lab-accent text-lab-900' : 'bg-lab-800 hover:bg-lab-700'
+                                                    }`}
+                                                >
+                                                    Use Custom Equation
+                                                </button>
+                                                {builtInGenerators.map((g) => (
+                                                    <button 
+                                                        key={g.type}
+                                                        onClick={() => {
+                                                            setBuiltInGenerator(g.type);
+                                                            setShowBuiltInDropdown(false);
+                                                        }}
+                                                        className={`w-full px-3 py-2 text-left text-sm rounded transition-colors ${
+                                                            builtInGenerator === g.type ? 'bg-lab-accent text-lab-900' : 'bg-lab-800 hover:bg-lab-700'
+                                                        }`}
+                                                    >
+                                                        <div className="font-semibold">{g.name}</div>
+                                                        <div className="text-xs text-gray-500">{g.description}</div>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                    
+                                    {/* Contrast Stretch */}
+                                    <div>
+                                        <button
+                                            onClick={() => setShowContrastDropdown(!showContrastDropdown)}
+                                            className="w-full px-3 py-2 bg-lab-800 hover:bg-lab-700 rounded text-sm flex items-center justify-between transition-colors"
+                                        >
+                                            <span>Contrast Stretch {contrastStretch.enabled ? '✓' : ''}</span>
+                                            <span>{showContrastDropdown ? '▲' : '▼'}</span>
+                                        </button>
+                                        {showContrastDropdown && (
+                                            <div className="mt-2 bg-lab-800 rounded p-3">
+                                                <div className="text-xs text-yellow-400 mb-3 font-bold">⚠️ VISUAL AID ONLY</div>
+                                                <label className="flex items-center gap-2 mb-3">
+                                                    <input 
+                                                        type="checkbox" 
+                                                        checked={contrastStretch.enabled}
+                                                        onChange={(e) => setContrastStretch({...contrastStretch, enabled: e.target.checked})}
+                                                        className="w-4 h-4"
+                                                    />
+                                                    <span className="text-sm">Enable</span>
+                                                </label>
+                                                {contrastStretch.enabled && (
+                                                    <>
+                                                        <label className="flex items-center gap-2 mb-3">
+                                                            <input 
+                                                                type="checkbox" 
+                                                                checked={contrastStretch.auto}
+                                                                onChange={(e) => setContrastStretch({...contrastStretch, auto: e.target.checked})}
+                                                                className="w-4 h-4"
+                                                            />
+                                                            <span className="text-sm">Auto (Min: {minMaxValues.min}, Max: {minMaxValues.max})</span>
+                                                        </label>
+                                                        {!contrastStretch.auto && (
+                                                            <div className="space-y-2">
+                                                                <div>
+                                                                    <label className="text-xs text-gray-400">Min: {contrastStretch.min}</label>
+                                                                    <input 
+                                                                        type="range" 
+                                                                        min="0" 
+                                                                        max="255" 
+                                                                        value={contrastStretch.min}
+                                                                        onChange={(e) => setContrastStretch({...contrastStretch, min: parseInt(e.target.value)})}
+                                                                        className="w-full"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="text-xs text-gray-400">Max: {contrastStretch.max}</label>
+                                                                    <input 
+                                                                        type="range" 
+                                                                        min="0" 
+                                                                        max="255" 
+                                                                        value={contrastStretch.max}
+                                                                        onChange={(e) => setContrastStretch({...contrastStretch, max: parseInt(e.target.value)})}
+                                                                        className="w-full"
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                    
+                                    {/* Side-by-Side View */}
+                                    <div>
+                                        <button 
+                                            onClick={() => {
+                                                const newMode = !sideBySideMode;
+                                                setSideBySideMode(newMode);
+                                                if (newMode) {
+                                                    setLeftConfig({ equation, seed });
+                                                    setRightConfig({ equation, seed: seed + 1 });
+                                                }
+                                                setShowMenu(false);
+                                            }}
+                                            className={`w-full px-4 py-2 rounded text-sm transition-colors ${
+                                                sideBySideMode ? 'bg-lab-accent text-lab-900' : 'bg-lab-800 hover:bg-lab-700'
+                                            }`}
+                                        >
+                                            👥 Split View {sideBySideMode ? '(Active)' : ''}
+                                        </button>
+                                    </div>
+                                    
+                                    {/* Presets */}
+                                    <div>
+                                        <button
+                                            onClick={() => setShowPresetsDropdown(!showPresetsDropdown)}
+                                            className="w-full px-3 py-2 bg-lab-800 hover:bg-lab-700 rounded text-sm flex items-center justify-between transition-colors"
+                                        >
+                                            <span>Equation Presets</span>
+                                            <span>{showPresetsDropdown ? '▲' : '▼'}</span>
+                                        </button>
+                                        {showPresetsDropdown && (
+                                            <div className="mt-2 space-y-1 pl-2">
+                                                {presets.map((p) => (
+                                                    <button 
+                                                        key={p.name}
+                                                        onClick={() => {
+                                                            setEquation(p.code);
+                                                            setShowPresetsDropdown(false);
+                                                        }}
+                                                        className="w-full px-3 py-2 text-left text-sm bg-lab-800 hover:bg-lab-700 rounded transition-colors"
+                                                    >
+                                                        {p.name}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                    
+                                    {/* Export/Import */}
+                                    <div className="flex gap-2 pt-3 border-t border-lab-700">
+                                        <button 
+                                            onClick={() => {
+                                                handleExportConfig();
+                                                setShowMenu(false);
+                                            }}
+                                            className="flex-1 px-4 py-2 bg-lab-700 hover:bg-lab-600 rounded text-sm transition-colors"
+                                        >
+                                            ⬇ Export
+                                        </button>
+                                        <button 
+                                            onClick={() => {
+                                                handleImportConfig();
+                                                setShowMenu(false);
+                                            }}
+                                            className="flex-1 px-4 py-2 bg-lab-700 hover:bg-lab-600 rounded text-sm transition-colors"
+                                        >
+                                            ⬆ Import
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                        
+                        {/* Equation Input */}
+                        <div className="flex-1 max-w-2xl relative">
+                            <textarea
+                                ref={textareaRef}
+                                value={equation}
+                                onChange={(e) => setEquation(e.target.value)}
+                                className="w-full h-12 bg-lab-900 border border-lab-700 rounded px-3 py-2 font-mono text-sm text-green-400 focus:outline-none focus:border-lab-accent resize-none"
+                                placeholder="e.g. (x ^ (x << 13)) + (x >> 7)"
+                            />
+                            {/* Symbol Buttons */}
+                            <div className="absolute -bottom-7 left-0 flex gap-1">
+                                {['+', '-', '*', '^', '&', '|', '~', '<<', '>>', 'ROL', 'ROR', '(', ')', 'x'].map((sym) => (
+                                    <button
+                                        key={sym}
+                                        onClick={() => insertSymbol(sym)}
+                                        className="px-2 py-0.5 bg-lab-700 hover:bg-lab-600 rounded text-xs font-mono transition-colors"
+                                        title={`Insert ${sym}`}
+                                    >
+                                        {sym}
+                                    </button>
+                                ))}
+                            </div>
+                            {showSyntaxHelper && (
+                                <div className="absolute top-full mt-1 bg-lab-900 border border-lab-700 rounded p-3 text-xs z-50 shadow-xl">
+                                    <div className="font-bold text-lab-accent mb-2">Equation Syntax Helper</div>
+                                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-gray-400 font-mono">
+                                        <span>+</span><span>Addition</span>
+                                        <span>-</span><span>Subtraction</span>
+                                        <span>*</span><span>Multiplication</span>
+                                        <span>^</span><span>XOR</span>
+                                        <span>&</span><span>AND</span>
+                                        <span>|</span><span>OR</span>
+                                        <span>~</span><span>NOT</span>
+                                        <span>&lt;&lt;</span><span>Left Shift</span>
+                                        <span>&gt;&gt;</span><span>Right Shift</span>
+                                        <span>ROL</span><span>Rotate Left</span>
+                                        <span>ROR</span><span>Rotate Right</span>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                        
+                        <button 
+                            onClick={() => setShowSyntaxHelper(!showSyntaxHelper)}
+                            className="px-3 py-2 bg-lab-700 hover:bg-lab-600 rounded text-xs transition-colors"
+                        >
+                            ?
+                        </button>
+
+                        {/* Seed */}
+                        <div className="flex items-center gap-2">
+                            <div>
+                                <label className="text-[10px] text-gray-500 block">Seed</label>
+                                <input 
+                                    type="number" 
+                                    value={seed}
+                                    onChange={(e) => setSeed(e.target.value)}
+                                    className="w-32 bg-lab-900 border border-lab-700 rounded px-2 py-1 font-mono text-sm"
+                                />
+                            </div>
+                            <button 
+                                onClick={handleRandomSeed}
+                                className="mt-4 px-3 py-1 bg-lab-700 hover:bg-lab-600 rounded text-xs transition-colors"
+                            >
+                                Random
+                            </button>
+                        </div>
+
+                        {/* Resolution */}
+                        <div>
+                            <label className="text-[10px] text-gray-500 block">Resolution</label>
+                            <select 
+                                value={resolution}
+                                onChange={(e) => setResolution(parseInt(e.target.value))}
+                                className="bg-lab-900 border border-lab-700 rounded px-2 py-1 font-mono text-sm"
+                            >
+                                <option value="256">256</option>
+                                <option value="512">512</option>
+                                <option value="1024">1024</option>
+                            </select>
+                        </div>
+
+                        {/* Generate Button */}
+                        <button 
+                            onClick={handleRun}
+                            disabled={isGenerating}
+                            className={`px-6 py-2 rounded font-bold uppercase text-sm transition-all ${
+                                isGenerating 
+                                ? 'bg-lab-700 text-gray-500 cursor-not-allowed' 
+                                : 'bg-lab-accent text-lab-900 hover:bg-white'
+                            }`}
+                        >
+                            {isGenerating ? 'Processing...' : 'Generate'}
+                        </button>
+
+                        {/* Bit Stats Toggle */}
+                        {bitStats && (
+                            <button 
+                                onClick={() => setShowBitStats(!showBitStats)}
+                                className={`px-4 py-2 rounded text-sm transition-colors ${
+                                    showBitStats ? 'bg-lab-accent text-lab-900' : 'bg-lab-700 hover:bg-lab-600'
+                                }`}
+                                title="Toggle bit statistics panel"
+                            >
+                                📊
+                            </button>
+                        )}
+                    </header>
+
+                    {/* Error Bar */}
+                    {error && (
+                        <div className="bg-red-900/50 border-b border-red-500 px-6 py-3 text-red-200 text-sm font-mono shadow-lg flex items-start justify-between">
+                            <div>
+                                <div className="font-bold text-red-300 mb-1">⚠️ ERROR:</div>
+                                <div>{error}</div>
+                            </div>
+                            <button 
+                                onClick={() => setError(null)}
+                                className="ml-4 px-2 py-1 hover:bg-red-800 rounded transition-colors text-red-300 hover:text-white"
+                                title="Dismiss error"
+                            >
+                                ✕
+                            </button>
+                        </div>
+                    )}
+
+                    {/* Bit Index Slider (conditional) */}
+                    {mode === 'bit' && (
+                        <div className="bg-lab-800 border-b border-lab-700 px-6 py-2 flex items-center gap-4">
+                            <label className="text-sm text-gray-400">Bit Index: {bitIndex}</label>
+                            <input 
+                                type="range" 
+                                min="0" max="31" 
+                                value={bitIndex}
+                                onChange={(e) => setBitIndex(e.target.value)}
+                                className="flex-1 max-w-md"
+                            />
+                            <span className="text-xs text-gray-500">0 (LSB) → 31 (MSB)</span>
+                        </div>
+                    )}
+
+                    {/* Side-by-Side Configuration Panel */}
+                    {sideBySideMode && (
+                        <div className="bg-lab-800 border-b border-lab-700 px-6 py-3 flex items-center gap-6">
+                            <div className="flex-1">
+                                <label className="text-xs text-gray-400 block mb-1">Left Panel</label>
+                                <div className="flex items-center gap-2">
+                                    <input 
+                                        type="text"
+                                        value={leftConfig.equation}
+                                        onChange={(e) => setLeftConfig({...leftConfig, equation: e.target.value})}
+                                        placeholder="Equation"
+                                        className="flex-1 bg-lab-900 border border-lab-700 rounded px-2 py-1 text-xs font-mono"
+                                    />
+                                    <input 
+                                        type="number"
+                                        value={leftConfig.seed}
+                                        onChange={(e) => setLeftConfig({...leftConfig, seed: e.target.value})}
+                                        placeholder="Seed"
+                                        className="w-24 bg-lab-900 border border-lab-700 rounded px-2 py-1 text-xs font-mono"
+                                    />
+                                </div>
+                            </div>
+                            <div className="flex-1">
+                                <label className="text-xs text-gray-400 block mb-1">Right Panel</label>
+                                <div className="flex items-center gap-2">
+                                    <input 
+                                        type="text"
+                                        value={rightConfig.equation}
+                                        onChange={(e) => setRightConfig({...rightConfig, equation: e.target.value})}
+                                        placeholder="Equation"
+                                        className="flex-1 bg-lab-900 border border-lab-700 rounded px-2 py-1 text-xs font-mono"
+                                    />
+                                    <input 
+                                        type="number"
+                                        value={rightConfig.seed}
+                                        onChange={(e) => setRightConfig({...rightConfig, seed: e.target.value})}
+                                        placeholder="Seed"
+                                        className="w-24 bg-lab-900 border border-lab-700 rounded px-2 py-1 text-xs font-mono"
+                                    />
+                                </div>
+                            </div>
+                            <button 
+                                onClick={() => {
+                                    setRightConfig({ equation: leftConfig.equation, seed: parseInt(leftConfig.seed) + 1 });
+                                }}
+                                className="px-3 py-1 bg-lab-700 hover:bg-lab-600 rounded text-xs"
+                                title="Same generator, different seed"
+                            >
+                                Same Gen, Diff Seed
+                            </button>
+                        </div>
+                    )}
+
+                    {/* Progress Bar */}
+                    {isGenerating && progress > 0 && (
+                        <div className="bg-lab-800 border-b border-lab-700 px-6 py-2">
+                            <div className="flex items-center gap-4">
+                                <div className="flex-1 bg-lab-900 rounded-full h-4 overflow-hidden">
+                                    <div 
+                                        className="h-full bg-lab-accent transition-all duration-200"
+                                        style={{ width: `${progress}%` }}
+                                    />
+                                </div>
+                                <span className="text-sm text-gray-400 font-mono w-16">{Math.round(progress)}%</span>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* MAIN CANVAS AREA */}
+                    <main 
+                        ref={viewportRef}
+                        className="flex-1 bg-black overflow-hidden canvas-viewport relative"
+                        onWheel={handleWheel}
+                        onMouseDown={handleMouseDown}
+                        onMouseMove={handleMouseMove}
+                        onMouseUp={handleMouseUp}
+                        onMouseLeave={handleMouseUp}
+                    >
+                        {sideBySideMode ? (
+                            <div className="flex h-full">
+                                {/* Left Canvas */}
+                                <div className="flex-1 relative flex items-center justify-center border-r-2 border-lab-accent">
+                                    <div 
+                                        className="canvas-wrapper"
+                                        style={{
+                                            transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`
+                                        }}
+                                    >
+                                        <canvas 
+                                            ref={canvasLeftRef}
+                                            style={{ imageRendering: 'pixelated', display: 'block' }}
+                                        />
+                                    </div>
+                                    <div className="absolute top-2 left-2 bg-lab-800/80 backdrop-blur border border-lab-700 px-2 py-1 rounded text-xs text-gray-400 font-mono">
+                                        Left: {leftConfig.equation.substring(0, 20)}{leftConfig.equation.length > 20 ? '...' : ''} | Seed: {leftConfig.seed}
+                                    </div>
+                                </div>
+                                
+                                {/* Right Canvas */}
+                                <div className="flex-1 relative flex items-center justify-center">
+                                    <div 
+                                        className="canvas-wrapper"
+                                        style={{
+                                            transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`
+                                        }}
+                                    >
+                                        <canvas 
+                                            ref={canvasRightRef}
+                                            style={{ imageRendering: 'pixelated', display: 'block' }}
+                                        />
+                                    </div>
+                                    <div className="absolute top-2 left-2 bg-lab-800/80 backdrop-blur border border-lab-700 px-2 py-1 rounded text-xs text-gray-400 font-mono">
+                                        Right: {rightConfig.equation.substring(0, 20)}{rightConfig.equation.length > 20 ? '...' : ''} | Seed: {rightConfig.seed}
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            <div 
+                                className="canvas-wrapper"
+                                style={{
+                                    transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`
+                                }}
+                            >
+                                <canvas 
+                                    ref={canvasRef}
+                                    style={{ imageRendering: 'pixelated', display: 'block' }}
+                                />
+                            </div>
+                        )}
+
+                        {/* Zoom Controls */}
+                        <div className="absolute bottom-4 right-4 flex flex-col gap-2 bg-lab-800/80 backdrop-blur border border-lab-700 rounded p-2">
+                            <button 
+                                onClick={() => setScale(s => Math.min(s * 1.2, 10))}
+                                className="px-3 py-1 bg-lab-700 hover:bg-lab-600 rounded text-sm"
+                            >
+                                +
+                            </button>
+                            <div className="text-xs text-center text-gray-400">{Math.round(scale * 100)}%</div>
+                            <button 
+                                onClick={() => setScale(s => Math.max(s / 1.2, 0.1))}
+                                className="px-3 py-1 bg-lab-700 hover:bg-lab-600 rounded text-sm"
+                            >
+                                −
+                            </button>
+                            <button 
+                                onClick={resetView}
+                                className="px-3 py-1 bg-lab-700 hover:bg-lab-600 rounded text-xs mt-2"
+                            >
+                                Reset
+                            </button>
+                        </div>
+
+                        {/* Info Badge */}
+                        {!sideBySideMode && (
+                            <div className="absolute top-4 left-4 bg-lab-800/80 backdrop-blur border border-lab-700 px-3 py-1 rounded text-xs text-gray-400 font-mono">
+                                {resolution}×{resolution} | Zoom: {Math.round(scale * 100)}%
+                            </div>
+                        )}
+
+                        {/* Bit Statistics Panel */}
+                        {showBitStats && bitStats && (
+                            <div className="absolute top-4 right-4 bg-lab-800/95 backdrop-blur border border-lab-700 rounded shadow-2xl p-4 max-h-[80vh] overflow-y-auto" style={{ width: '320px' }}>
+                                <div className="flex items-center justify-between mb-3">
+                                    <h3 className="text-sm font-bold text-lab-accent">Bit Statistics</h3>
+                                    <button 
+                                        onClick={() => setShowBitStats(false)}
+                                        className="px-2 py-1 hover:bg-lab-700 rounded text-xs transition-colors"
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+                                <div className="space-y-1">
+                                    {bitStats.map(({ bit, proportion, imbalance }) => (
+                                        <div key={bit} className="flex items-center gap-2 text-xs font-mono">
+                                            <span className="w-8 text-gray-400">{bit}:</span>
+                                            <div className="flex-1 bg-lab-900 rounded overflow-hidden h-5 relative">
+                                                <div 
+                                                    className="h-full bg-lab-accent/60"
+                                                    style={{ width: `${proportion * 100}%` }}
+                                                />
+                                                <span className="absolute inset-0 flex items-center justify-center text-[10px]">
+                                                    {(proportion * 100).toFixed(1)}%
+                                                </span>
+                                            </div>
+                                            <span className={`w-12 text-right ${
+                                                imbalance > 0.1 ? 'text-red-400' : imbalance > 0.05 ? 'text-yellow-400' : 'text-green-400'
+                                            }`}>
+                                                {(imbalance * 100).toFixed(1)}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="mt-3 pt-3 border-t border-lab-700 text-[10px] text-gray-500">
+                                    <div>Proportion: % of 1s in bit position</div>
+                                    <div>Imbalance: |0.5 - proportion|</div>
+                                    <div className="mt-1">
+                                        <span className="text-green-400">Green</span>: &lt;5% | 
+                                        <span className="text-yellow-400"> Yellow</span>: 5-10% | 
+                                        <span className="text-red-400"> Red</span>: &gt;10%
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Loading Overlay */}
+                        {isGenerating && (
+                            <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center z-20 backdrop-blur-sm">
+                                <div className="w-12 h-12 border-4 border-lab-accent border-t-transparent rounded-full animate-spin mb-4"></div>
+                                <div className="text-lab-accent font-mono text-sm animate-pulse">Processing {resolution}×{resolution} pixels...</div>
+                            </div>
+                        )}
+                    </main>
+                    </>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

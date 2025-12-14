@@ -1,0 +1,17 @@
+# Exclude monolithic HTML and test images
+prng.html
+image/
+
+# Environment files
+*.env
+
+# Generated config files (optional - remove if you want to track them)
+prng_config_*.json
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+Thumbs.db

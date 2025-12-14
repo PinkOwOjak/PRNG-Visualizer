@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test - PRNG Visual Analyzer</title>
+    
+    <link rel="stylesheet" href="styles.css">
+    
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        lab: {
+                            900: '#0f172a',
+                            800: '#1e293b',
+                            700: '#334155',
+                            accent: '#38bdf8',
+                            danger: '#ef4444',
+                            success: '#22c55e'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="root"></div>
+    
+    <script>
+        console.log('=== Loading test ===');
+        console.log('React:', typeof React);
+        console.log('ReactDOM:', typeof ReactDOM);
+    </script>
+    
+    <script src="constants.js"></script>
+    <script>
+        console.log('Constants loaded:', typeof PRNGConstants);
+    </script>
+    
+    <script type="text/babel" src="components/CanvasViewport.js"></script>
+    <script type="text/babel">
+        console.log('CanvasViewport:', typeof CanvasViewport);
+    </script>
+    
+    <script type="text/babel" src="components/Toolbar.js"></script>
+    <script type="text/babel">
+        console.log('Toolbar:', typeof Toolbar);
+    </script>
+    
+    <script type="text/babel" src="components/Panel.js"></script>
+    <script type="text/babel">
+        console.log('Panel:', typeof Panel);
+    </script>
+    
+    <script type="text/babel">
+        const { useState } = React;
+        
+        function TestApp() {
+            return (
+                <div className="p-4">
+                    <h1 className="text-2xl text-lab-accent">Test Successful!</h1>
+                    <p className="text-gray-400">All components loaded.</p>
+                </div>
+            );
+        }
+        
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<TestApp />);
+        console.log('=== Render complete ===');
+    </script>
+</body>
+</html>
