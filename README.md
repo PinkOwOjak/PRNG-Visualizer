@@ -1,45 +1,29 @@
-# PRNG Visualizer - Project Structure
+# PRNG Visual Analyzer 🎨
 
-## File Organization
+A powerful visualization tool for analyzing Pseudo-Random Number Generators (PRNGs) through visual patterns. Experiment with custom equations or built-in generators to understand their output quality and detect biases.
 
-### 1. HTML (Entry Point)
-- **index.html** - Thin shell that loads all dependencies and scripts
-  - Loads React, ReactDOM, Babel, Tailwind CSS
-  - Defines root div
-  - Loads scripts in correct order
+![PRNG Visualizer](https://img.shields.io/badge/React-18-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
-### 2. CSS
-- **styles.css** - Custom styles
-  - Body and canvas viewport styles
-  - Custom scrollbar styling
-  - Pixelated image rendering
+## ✨ Features
 
-### 3. Worker Code
-- **worker.js** - PRNG computation worker (runs in separate thread)
-  - Tokenizer and RPN evaluator
-  - Built-in generators (LCG, Xorshift32, SplitMix, etc.)
-  - Image generation with fast/slow paths
-  - Progress reporting
+- **Custom Equations**: Write your own PRNG logic using mathematical operators
+- **Built-in Generators**: LCG, Xorshift32, SplitMix, and intentionally flawed examples
+- **Multiple Visualization Modes**: Raw output, bit planes, differential analysis
+- **Split-View Comparison**: Compare two generators side-by-side
+- **Bit Statistics**: Analyze bit distribution and detect biases
+- **Zoom & Pan**: Inspect patterns at pixel level
+- **Contrast Stretch**: Enhance subtle patterns (visual aid only)
+- **Export/Import**: Save and share configurations
+- **Web Workers**: Non-blocking computation for large images
 
-### 4. Constants
-- **constants.js** - Configuration and data
-  - Presets (equation templates)
-  - Built-in generator definitions
-  - Visualization modes
+## 🚀 Quick Start
 
-### 5. UI Components
-- **components/CanvasViewport.js** - Canvas with zoom controls
-- **components/Toolbar.js** - Panel header with inputs and menu
-- **components/Panel.js** - Complete split-view panel
-- **App.js** - Main application logic
+### Option 1: Single File (Easiest)
+Open [test.html](test.html) directly in a browser - all functionality in one file!
 
-## Usage
+### Option 2: Modular Version (Development)
+**⚠️ IMPORTANT**: Must use HTTP server due to CORS restrictions
 
-### Development
-
-**IMPORTANT**: Due to CORS restrictions, you must serve the files via HTTP, not open them directly as `file://`.
-
-#### Option 1: Python HTTP Server
 ```bash
 # Python 3
 python -m http.server 8000
@@ -47,56 +31,126 @@ python -m http.server 8000
 # Then open: http://localhost:8000/index.html
 ```
 
-#### Option 2: Node.js HTTP Server
-```bash
-npx http-server -p 8000
+## 📁 Project Structure
 
-# Then open: http://localhost:8000/index.html
+## 📁 Project Structure
+
+### Modular Files (index.html)
+```
+├── index.html          # Entry point, loads all dependencies
+├── App.js              # Main React application
+├── worker.js           # PRNG computation (Web Worker)
+├── styles.css          # Custom styles
+├── constants.js        # Presets, modes, generator definitions
+└── components/
+    ├── CanvasViewport.js   # Canvas rendering with zoom
+    ├── Toolbar.js          # Control panel header
+    └── Panel.js            # Split-view panel
 ```
 
-#### Option 3: VS Code Live Server Extension
-- Install "Live Server" extension
-- Right-click index.html → "Open with Live Server"
+### Single File Version
+- **test.html** - Complete standalone implementation (all features in one file)
 
-### Loading Worker
-The worker is loaded from `worker.js` directly:
+## 🎮 How to Use
+
+1. **Enter an Equation**: Use operators like `+`, `-`, `*`, `^` (XOR), `&`, `|`, `<<`, `>>`
+   - Variable `x` represents the previous output
+   - Example: `x ^ (x << 13)` creates interesting patterns
+
+2. **Set Parameters**:
+   - **Seed**: Starting value (use Random button for variety)
+   - **Resolution**: Image size (256×256, 512×512, or 1024×1024)
+
+3. **Choose Mode** (via Menu):
+   - **Raw Output**: Direct PRNG output as grayscale
+   - **Bit Plane**: Visualize individual bit positions
+   - **Differential**: Show changes between consecutive outputs
+
+4. **Generate**: Click to create visualization
+
+5. **Analyze**:
+   - **Zoom**: Mouse wheel or +/- buttons
+   - **Pan**: Click and drag
+   - **Stats**: View bit distribution (📊 button)
+
+### Example Equations
+
 ```javascript
-const worker = new Worker('worker.js');
+x ^ (x << 13)              // Good: Xorshift-like
+x * 1103515245 + 12345     // Classic LCG
+(x << 5) | (x >> 27)       // Rotate left
+x ^ (x >> 7) ^ (x << 9)    // Multiple XOR shifts
+(x * x) >> 8               // Quadratic (bad!)
 ```
 
-### Component Structure
-```
-App
-├── Single View Mode
-│   ├── Header (Menu, Equation, Seed, Resolution, Generate)
-│   └── Canvas (with zoom/pan)
-└── Split View Mode
-    ├── Exit Button
-    ├── Left Panel
-    │   ├── Toolbar
-    │   └── CanvasViewport
-    └── Right Panel
-        ├── Toolbar
-        └── CanvasViewport
+## 🔧 Technical Details
+
+- **React 18**: UI framework (loaded via CDN)
+- **Tailwind CSS**: Styling (loaded via CDN)
+- **Babel Standalone**: JSX transformation (no build step needed)
+- **Web Workers**: Offload computation to separate thread
+- **Canvas API**: High-performance pixel rendering
+
+## 📊 Understanding Output
+
+- **Good PRNGs**: Show "white noise" patterns, even bit distribution
+- **Bad PRNGs**: Reveal stripes, grids, or repeating structures
+- **Bit Stats**: Healthy generators have ~50% proportion per bit (low imbalance)
+
+## 🤝 Contributing
+
+Contributions welcome! Feel free to:
+- Add new built-in generators
+- Implement additional visualization modes
+- Improve performance optimizations
+- Fix bugs or enhance UI
+
+## 📄 License
+
+MIT License - feel free to use and modify!
+
+---
+
+## 🛠️ Development Notes
+
+### File Loading Order (index.html)
+1. React & ReactDOM
+2. Babel Standalone
+3. Tailwind CSS
+4. constants.js
+5. Component files
+6. App.js
+
+### Worker Communication
+```javascript
+// Send to worker
+worker.postMessage({
+  equation, seed, resolution, mode,
+  bitPlaneIndex, contrastStretch
+});
+
+// Receive from worker
+worker.onmessage = (e) => {
+  const { success, buffer, resolution, stats } = e.data;
+  // Draw buffer to canvas...
+};
 ```
 
 ## Troubleshooting
 
-### Page doesn't load / Components not showing
-1. Make sure you're serving via HTTP (not `file://`)
-2. Check browser console for errors
-3. Verify all files are in correct directories
-4. Check that constants.js loads before components
+### CORS / Page doesn't load
+- **Problem**: Must serve via HTTP (not `file://`)
+- **Solution**: Use Python/Node HTTP server or VS Code Live Server extension
+
+### Components not showing
+- Check browser console for errors
+- Verify all files are in the correct directory
+- Ensure constants.js loads before App.js
 
 ### Worker errors
-1. Verify worker.js is in the same directory as index.html
-2. Check browser console for worker errors
-3. Ensure CORS is not blocking worker loading
+- Verify worker.js is in the same directory as index.html
+- Check browser console for worker-specific errors
 
-## Benefits of Separation
+---
 
-1. **Maintainability** - Each file has a single responsibility
-2. **Worker Performance** - Computation runs in separate thread
-3. **CSS Organization** - Styles in dedicated file, easy to modify
-4. **Component Reusability** - Panel/Toolbar/Canvas can be reused
-5. **Debugging** - Easier to locate and fix issues
+**Made with ❤️ for understanding randomness through visualization**
