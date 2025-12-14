@@ -4,7 +4,6 @@
 
 self.onmessage = function(e) {
     const { equation, seed, resolution, mode, bitPlaneIndex, contrastStretch, useBuiltIn, builtInType } = e.data;
-    console.log('Worker received:', { equation, seed, resolution, mode, useBuiltIn, builtInType });
     
     try {
         let finalEquation = equation;
@@ -13,21 +12,6 @@ self.onmessage = function(e) {
         }
         
         const result = generateImage(finalEquation, seed, resolution, mode, bitPlaneIndex, contrastStretch, true);
-        console.log('Worker finished, sending back result');
-        console.log('Result buffer length:', result.buffer.byteLength, 'stats:', result.stats);
-        
-        // Check first few bytes BEFORE transfer
-        const view = new Uint8Array(result.buffer);
-        console.log('First 12 bytes from buffer (before transfer):', Array.from(view.slice(0, 12)));
-        console.log('Stats from worker:', result.stats);
-        
-        // Sample some values
-        const samples = [];
-        for (let i = 0; i < Math.min(100, view.length); i += 4) {
-            samples.push(view[i]);
-        }
-        console.log('Sample R channel values (first 25):', samples.slice(0, 25));
-        console.log('Min R:', Math.min(...samples), 'Max R:', Math.max(...samples));
         
         self.postMessage({ 
             success: true, 
@@ -36,10 +20,8 @@ self.onmessage = function(e) {
             resolution: resolution 
         }, [result.buffer]);
         
-        console.log('Message posted successfully');
     } catch (err) {
         console.error('Worker error:', err);
-        console.error('Stack:', err.stack);
         self.postMessage({ success: false, error: err.message });
     }
 };
@@ -214,12 +196,8 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
         'bad2': badGenerator2
     };
     
-    console.log('[generateImage] eqStr:', eqStr, 'isBuiltIn check:', builtInGenerators.hasOwnProperty(eqStr));
-    
     const isBuiltIn = builtInGenerators.hasOwnProperty(eqStr);
     const generatorFunc = isBuiltIn ? builtInGenerators[eqStr] : null;
-    
-    console.log('[generateImage] isBuiltIn:', isBuiltIn, 'generatorFunc:', generatorFunc);
     
     let tokens, rpn;
     if (!isBuiltIn) {
@@ -281,8 +259,6 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
         const inv = 1 / 4294967296;
         let minVal = 255, maxVal = 0;
         
-        console.log('[generateImage] Mode:', mode, 'Contrast stretch:', contrastStretch);
-        
         // Fast path: single-pass when contrast stretch is disabled
         if (!contrastStretch || !contrastStretch.enabled) {
             console.log('[generateImage] Taking FAST path (no contrast stretch)');
@@ -333,7 +309,6 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
         } 
         // Slow path: two-pass when contrast stretch is enabled
         else {
-            console.log('[generateImage] Taking SLOW path (with contrast stretch)');
             // First pass: generate and store raw values
             for (let i = 0; i < totalPixels; i++) {
                 x = isBuiltIn ? generatorFunc(x) : evaluateRPN(rpn, x);
@@ -347,9 +322,6 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
                     self.postMessage({ type: 'progress', progress: (i / totalPixels) * 50 });
                 }
             }
-            
-            // Check rawValues after first pass
-            console.log('[Slow path] First 5 rawValues:', rawValues[0], rawValues[1], rawValues[2], rawValues[3], rawValues[4]);
             
             // Second pass: compute grayscale values
             const tempGray = new Uint8Array(totalPixels);
@@ -390,16 +362,7 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
             const useMax = contrastStretch.auto ? maxVal : contrastStretch.max;
             const range = useMax - useMin;
             
-            console.log('[Slow path] Before contrast stretch - minVal:', minVal, 'maxVal:', maxVal);
-            console.log('[Slow path] Contrast stretch - useMin:', useMin, 'useMax:', useMax, 'range:', range);
-            
-            // Sample tempGray before stretch
-            const tempSamples = [];
-            for (let i = 0; i < 10; i++) tempSamples.push(tempGray[i]);
-            console.log('[Slow path] First 10 tempGray values:', tempSamples);
-            
             if (range > 0) {
-                console.log('[Slow path] Applying contrast stretch with range:', range);
                 for (let i = 0; i < totalPixels; i++) {
                     const stretched = ((tempGray[i] - useMin) * 255) / range;
                     const pIdx = i << 2;
@@ -407,12 +370,11 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
                     buffer[pIdx + 1] = stretched | 0;
                     buffer[pIdx + 2] = stretched | 0;
                     buffer[pIdx + 3] = 255;
+                    
+                    if (onProgress && i % progressReportInterval === 0) {
+                        self.postMessage({ type: 'progress', progress: 50 + (i / totalPixels) * 50 });
+                    }
                 }
-                
-                // Sample buffer after stretch
-                const stretchedSamples = [];
-                for (let i = 0; i < 40; i += 4) stretchedSamples.push(buffer[i]);
-                console.log('[Slow path] First 10 R values after stretch:', stretchedSamples);
             } else {
                 for (let i = 0; i < totalPixels; i++) {
                     const pIdx = i << 2;

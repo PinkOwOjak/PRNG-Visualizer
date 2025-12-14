@@ -17,6 +17,7 @@ function App() {
     const [builtInGenerator, setBuiltInGenerator] = useState('');
     const [bitStats, setBitStats] = useState(null);
     const [showBitStats, setShowBitStats] = useState(false);
+    const [showModeDescription, setShowModeDescription] = useState(false);
     const [sideBySideMode, setSideBySideMode] = useState(false);
     
     const [showMenu, setShowMenu] = useState(false);
@@ -46,6 +47,7 @@ function App() {
         showBuiltInMenu: false,
         showPresetsMenu: false,
         showContrastMenu: false,
+        showModeDescription: false,
         isGenerating: false
     });
     
@@ -64,6 +66,7 @@ function App() {
         showBuiltInMenu: false,
         showPresetsMenu: false,
         showContrastMenu: false,
+        showModeDescription: false,
         isGenerating: false
     });
     
@@ -170,13 +173,18 @@ function App() {
 
     const drawBufferToCanvas = (buffer, res, targetCanvas = null, panelScale = 1, panelPan = { x: 0, y: 0 }) => {
         const canvas = targetCanvas || canvasRef.current;
-        if (!canvas) return;
+        if (!canvas) {
+            console.error('Canvas not found!');
+            return;
+        }
         
         if (canvas.width !== res) canvas.width = res;
         if (canvas.height !== res) canvas.height = res;
 
         const ctx = canvas.getContext("2d");
-        const imgData = new ImageData(new Uint8ClampedArray(buffer), res, res);
+        const uint8Array = new Uint8ClampedArray(buffer);
+        
+        const imgData = new ImageData(uint8Array, res, res);
         ctx.putImageData(imgData, 0, 0);
         
         if (targetCanvas && canvas.parentElement) {
@@ -704,6 +712,14 @@ function App() {
                             📊 Stats
                         </button>
                     )}
+
+                    {/* Description Button */}
+                    <button 
+                        onClick={() => setShowModeDescription(!showModeDescription)}
+                        className="px-3 py-2 bg-lab-700 hover:bg-lab-600 rounded text-xs transition-colors"
+                    >
+                        📖 Info
+                    </button>
                 </header>
 
                 {/* Syntax Helper */}
@@ -733,6 +749,21 @@ function App() {
                     </div>
                 )}
 
+                {/* Bit Index Slider (conditional) */}
+                {mode === 'bit' && (
+                    <div className="bg-lab-800 border-b border-lab-700 px-6 py-2 flex items-center gap-4">
+                        <label className="text-sm text-gray-400">Bit Index: {bitIndex}</label>
+                        <input 
+                            type="range" 
+                            min="0" max="31" 
+                            value={bitIndex}
+                            onChange={(e) => setBitIndex(parseInt(e.target.value))}
+                            className="flex-1 max-w-md"
+                        />
+                        <span className="text-xs text-gray-500">0 (LSB) → 31 (MSB)</span>
+                    </div>
+                )}
+
                 {/* Progress Bar */}
                 {isGenerating && progress > 0 && (
                     <div className="bg-lab-800 border-b border-lab-700 px-6 py-2">
@@ -751,7 +782,7 @@ function App() {
                 {/* MAIN CANVAS AREA */}
                 <main 
                     ref={viewportRef}
-                    className="flex-1 bg-black overflow-hidden canvas-viewport relative"
+                    className="flex-1 bg-gray-900 overflow-hidden canvas-viewport relative"
                     onWheel={handleWheel}
                     onMouseDown={handleMouseDown}
                     onMouseMove={handleMouseMove}
@@ -797,6 +828,83 @@ function App() {
                     <div className="absolute top-4 left-4 bg-lab-800/80 backdrop-blur border border-lab-700 px-3 py-1 rounded text-xs text-gray-400 font-mono">
                         {resolution}×{resolution} | Zoom: {Math.round(scale * 100)}%
                     </div>
+
+                    {/* Mode Description Panel */}
+                    {showModeDescription && (
+                        <div className="absolute top-4 left-4 bg-lab-800/95 backdrop-blur border border-lab-700 rounded shadow-2xl p-4 max-h-[80vh] overflow-y-auto" style={{ width: '380px' }}>
+                            <div className="flex items-center justify-between mb-3">
+                                <h3 className="text-sm font-bold text-lab-accent">
+                                    {modes.find(m => m.id === mode)?.label || mode} Mode
+                                </h3>
+                                <button 
+                                    onClick={() => setShowModeDescription(false)}
+                                    className="px-2 py-1 hover:bg-lab-700 rounded text-xs transition-colors"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+                            <div className="space-y-3 text-xs text-gray-300">
+                                {mode === 'raw' && (
+                                    <>
+                                        <p className="font-bold text-lab-accent">Raw Output Visualization</p>
+                                        <p>Displays the raw 32-bit PRNG output converted to grayscale (0-255).</p>
+                                        <p className="text-gray-400">• Each pixel = value / 2³² × 255</p>
+                                        <p className="text-gray-400">• Shows distribution of generated values</p>
+                                        <p className="mt-2"><strong>Good PRNG:</strong> Random gray noise</p>
+                                        <p><strong>Bad PRNG:</strong> Visible patterns, stripes, or repetition</p>
+                                    </>
+                                )}
+                                {mode === 'bit' && (
+                                    <>
+                                        <p className="font-bold text-lab-accent">Bit Plane Extraction</p>
+                                        <p>Isolates a single bit position (0-31) from each 32-bit output.</p>
+                                        <p className="text-gray-400">• Bit 0 = LSB (least significant)</p>
+                                        <p className="text-gray-400">• Bit 31 = MSB (most significant)</p>
+                                        <p className="text-gray-400">• White = 1, Black = 0</p>
+                                        <p className="mt-2"><strong>Good PRNG:</strong> Random checkerboard (50/50 black/white)</p>
+                                        <p><strong>Bad PRNG:</strong> All same color, stripes, or clear patterns</p>
+                                        <p className="mt-2 text-yellow-400">💡 Use bit slider to check all 32 bits</p>
+                                    </>
+                                )}
+                                {mode === 'hamming' && (
+                                    <>
+                                        <p className="font-bold text-lab-accent">Hamming Weight (Population Count)</p>
+                                        <p>Counts the number of 1-bits in each 32-bit output.</p>
+                                        <p className="text-gray-400">• Range: 0-32 bits set</p>
+                                        <p className="text-gray-400">• Darker = fewer 1s, Brighter = more 1s</p>
+                                        <p className="text-gray-400">• Maps bit count to grayscale</p>
+                                        <p className="mt-2"><strong>Good PRNG:</strong> Mid-gray noise (avg ~16 bits)</p>
+                                        <p><strong>Bad PRNG:</strong> Too dark/bright, or visible patterns</p>
+                                        <p className="mt-2 text-yellow-400">💡 Tests bit balance across entire word</p>
+                                    </>
+                                )}
+                                {mode === 'pair' && (
+                                    <>
+                                        <p className="font-bold text-lab-accent">Successive Pair Plot</p>
+                                        <p>Plots consecutive outputs as (x, y) coordinates on a density map.</p>
+                                        <p className="text-gray-400">• X-axis = previous value mod resolution</p>
+                                        <p className="text-gray-400">• Y-axis = current value mod resolution</p>
+                                        <p className="text-gray-400">• Brightness = hit frequency (log scale)</p>
+                                        <p className="mt-2"><strong>Good PRNG:</strong> Uniform scatter across entire canvas</p>
+                                        <p><strong>Bad PRNG:</strong> Few dots, lines, patterns, or clustering</p>
+                                        <p className="mt-2 text-yellow-400">💡 Reveals correlation between successive outputs</p>
+                                    </>
+                                )}
+                                {mode === 'transition' && (
+                                    <>
+                                        <p className="font-bold text-lab-accent">Transition XOR Differences</p>
+                                        <p>Shows XOR between consecutive outputs to reveal bit-flip patterns.</p>
+                                        <p className="text-gray-400">• Computes: current ⊕ previous</p>
+                                        <p className="text-gray-400">• Highlights which bits change</p>
+                                        <p className="text-gray-400">• XOR difference mapped to grayscale</p>
+                                        <p className="mt-2"><strong>Good PRNG:</strong> Random gray noise (high entropy changes)</p>
+                                        <p><strong>Bad PRNG:</strong> Repetitive patterns or low variation</p>
+                                        <p className="mt-2 text-yellow-400">💡 Detects predictable state transitions</p>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                    )}
 
                     {/* Bit Statistics Panel */}
                     {showBitStats && bitStats && (
