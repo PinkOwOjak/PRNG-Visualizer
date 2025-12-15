@@ -5,10 +5,10 @@
 
 function CanvasViewport({ canvasRef, panel, onZoomChange, onPanChange }) {
     return (
-        <div className="flex-1 relative bg-black">
+        <div className="flex-1 relative bg-gray-900">
             <canvas 
                 ref={canvasRef}
-                style={{ imageRendering: 'pixelated', display: 'block', margin: 'auto' }}
+                style={{ imageRendering: 'pixelated', display: 'block' }}
             />
             
             {/* Zoom Controls */}

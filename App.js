@@ -147,6 +147,7 @@ function App() {
                 const scaledWidth = canvas.width * leftPanel.scale;
                 const scaledHeight = canvas.height * leftPanel.scale;
                 canvas.style.position = 'absolute';
+                canvas.style.margin = '0';
                 canvas.style.left = `${(container.clientWidth - scaledWidth) / 2 + leftPanel.pan.x}px`;
                 canvas.style.top = `${(container.clientHeight - scaledHeight) / 2 + leftPanel.pan.y}px`;
                 canvas.style.width = `${scaledWidth}px`;
@@ -163,6 +164,7 @@ function App() {
                 const scaledWidth = canvas.width * rightPanel.scale;
                 const scaledHeight = canvas.height * rightPanel.scale;
                 canvas.style.position = 'absolute';
+                canvas.style.margin = '0';
                 canvas.style.left = `${(container.clientWidth - scaledWidth) / 2 + rightPanel.pan.x}px`;
                 canvas.style.top = `${(container.clientHeight - scaledHeight) / 2 + rightPanel.pan.y}px`;
                 canvas.style.width = `${scaledWidth}px`;
@@ -289,6 +291,47 @@ function App() {
         link.click();
     };
 
+    const handleExportSplitView = async () => {
+        const config = {
+            leftPanel: {
+                equation: leftPanel.equation,
+                seed: leftPanel.seed,
+                resolution: leftPanel.resolution,
+                mode: leftPanel.mode,
+                bitIndex: leftPanel.bitIndex,
+                builtInGenerator: leftPanel.builtInGenerator,
+                contrastStretch: leftPanel.contrastStretch
+            },
+            rightPanel: {
+                equation: rightPanel.equation,
+                seed: rightPanel.seed,
+                resolution: rightPanel.resolution,
+                mode: rightPanel.mode,
+                bitIndex: rightPanel.bitIndex,
+                builtInGenerator: rightPanel.builtInGenerator,
+                contrastStretch: rightPanel.contrastStretch
+            },
+            timestamp: new Date().toISOString()
+        };
+
+        // Export canvas images
+        const leftCanvas = canvasLeftRef.current;
+        const rightCanvas = canvasRightRef.current;
+        
+        if (leftCanvas && leftCanvas.width > 0) {
+            config.leftPanel.imageData = leftCanvas.toDataURL('image/png');
+        }
+        if (rightCanvas && rightCanvas.width > 0) {
+            config.rightPanel.imageData = rightCanvas.toDataURL('image/png');
+        }
+        
+        const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
+        const link = document.createElement('a');
+        link.download = `prng_split_${Date.now()}.json`;
+        link.href = URL.createObjectURL(blob);
+        link.click();
+    };
+
     const handleImportConfig = () => {
         const input = document.createElement('input');
         input.type = 'file';
@@ -312,6 +355,83 @@ function App() {
                     alert('Configuration loaded successfully!');
                 } catch (err) {
                     setError('Failed to load configuration: ' + err.message);
+                }
+            };
+            reader.readAsText(file);
+        };
+        input.click();
+    };
+
+    const handleImportSplitView = () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.onchange = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                try {
+                    const config = JSON.parse(event.target.result);
+                    
+                    // Load left panel
+                    if (config.leftPanel) {
+                        setLeftPanel(prev => ({
+                            ...prev,
+                            equation: config.leftPanel.equation || prev.equation,
+                            seed: config.leftPanel.seed || prev.seed,
+                            resolution: config.leftPanel.resolution || prev.resolution,
+                            mode: config.leftPanel.mode || prev.mode,
+                            bitIndex: config.leftPanel.bitIndex || prev.bitIndex,
+                            builtInGenerator: config.leftPanel.builtInGenerator || '',
+                            contrastStretch: config.leftPanel.contrastStretch || prev.contrastStretch
+                        }));
+
+                        // Load left image if exists
+                        if (config.leftPanel.imageData && canvasLeftRef.current) {
+                            const img = new Image();
+                            img.onload = () => {
+                                const canvas = canvasLeftRef.current;
+                                const ctx = canvas.getContext('2d');
+                                canvas.width = img.width;
+                                canvas.height = img.height;
+                                ctx.drawImage(img, 0, 0);
+                            };
+                            img.src = config.leftPanel.imageData;
+                        }
+                    }
+                    
+                    // Load right panel
+                    if (config.rightPanel) {
+                        setRightPanel(prev => ({
+                            ...prev,
+                            equation: config.rightPanel.equation || prev.equation,
+                            seed: config.rightPanel.seed || prev.seed,
+                            resolution: config.rightPanel.resolution || prev.resolution,
+                            mode: config.rightPanel.mode || prev.mode,
+                            bitIndex: config.rightPanel.bitIndex || prev.bitIndex,
+                            builtInGenerator: config.rightPanel.builtInGenerator || '',
+                            contrastStretch: config.rightPanel.contrastStretch || prev.contrastStretch
+                        }));
+
+                        // Load right image if exists
+                        if (config.rightPanel.imageData && canvasRightRef.current) {
+                            const img = new Image();
+                            img.onload = () => {
+                                const canvas = canvasRightRef.current;
+                                const ctx = canvas.getContext('2d');
+                                canvas.width = img.width;
+                                canvas.height = img.height;
+                                ctx.drawImage(img, 0, 0);
+                            };
+                            img.src = config.rightPanel.imageData;
+                        }
+                    }
+                    
+                    alert('Split view configuration loaded successfully!');
+                } catch (err) {
+                    alert('Failed to load configuration: ' + err.message);
                 }
             };
             reader.readAsText(file);
@@ -359,7 +479,27 @@ function App() {
         <div className="flex flex-col h-screen">
             {sideBySideMode ? (
                 <div className="flex flex-col h-screen">
-                    <div className="bg-lab-800 border-b border-lab-700 px-4 py-2 flex items-center justify-center">
+                    <div className="bg-lab-800 border-b border-lab-700 px-4 py-2 flex items-center justify-center gap-3">
+                        <button
+                            onClick={handleExportSplitView}
+                            className="px-4 py-1.5 bg-lab-700 hover:bg-lab-600 rounded text-sm font-medium flex items-center gap-2 transition-colors"
+                            title="Export both panels with images"
+                        >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                            </svg>
+                            Export
+                        </button>
+                        <button
+                            onClick={handleImportSplitView}
+                            className="px-4 py-1.5 bg-lab-700 hover:bg-lab-600 rounded text-sm font-medium flex items-center gap-2 transition-colors"
+                            title="Import both panels with images"
+                        >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                            </svg>
+                            Import
+                        </button>
                         <button
                             onClick={() => setSideBySideMode(false)}
                             className="px-4 py-1.5 bg-lab-700 hover:bg-lab-600 rounded text-sm font-medium flex items-center gap-2 transition-colors"

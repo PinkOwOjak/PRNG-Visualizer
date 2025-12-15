@@ -29,6 +29,26 @@ self.onmessage = function(e) {
 function tokenize(eq) {
     const cleanEq = eq.replace(/\s+/g, '');
     
+    // Check for orphan hex letters (A-F without 0x prefix)
+    // First remove valid 0x hex numbers, then check for remaining hex letters
+    const withoutValidHex = cleanEq.replace(/0x[0-9a-fA-F]+/g, '');
+    const orphanHexPattern = /[a-fA-F]+/g;
+    const orphanHexMatches = withoutValidHex.match(orphanHexPattern);
+    if (orphanHexMatches) {
+        // Filter out 'x' variable and ROL/ROR which are valid
+        const invalidHex = orphanHexMatches.filter(m => 
+            m.toLowerCase() !== 'x' && 
+            m.toUpperCase() !== 'rol' && 
+            m.toUpperCase() !== 'ror' &&
+            m.toLowerCase() !== 'r' &&
+            m.toLowerCase() !== 'o' &&
+            m.toLowerCase() !== 'l'
+        );
+        if (invalidHex.length > 0) {
+            throw new Error(`Invalid hex notation: ${[...new Set(invalidHex)].join(', ')}. Hex numbers must use 0x prefix (e.g., 0xFF not FF)`);
+        }
+    }
+    
     // First, extract ROL/ROR and replace temporarily to validate other chars
     const tempEq = cleanEq.replace(/ROL|ROR/gi, '');
     const validPattern = /^[0-9a-fA-Fx+\-*^&|~()<>,]*$/;
@@ -323,7 +343,17 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
                 }
             }
             
-            // Second pass: compute grayscale values
+            // Second pass: Find min/max from RAW values (for contrast stretch in raw mode)
+            let rawMin = 0xFFFFFFFF, rawMax = 0;
+            if (mode === 'raw') {
+                for (let i = 0; i < totalPixels; i++) {
+                    const val = rawValues[i];
+                    if (val < rawMin) rawMin = val;
+                    if (val > rawMax) rawMax = val;
+                }
+            }
+            
+            // Compute grayscale values
             const tempGray = new Uint8Array(totalPixels);
             x = seed >>> 0;
             prev_x = x;
@@ -333,7 +363,13 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
                 let gray = 0;
                 
                 if (mode === 'raw') {
-                    gray = (x * inv * 255) | 0;
+                    // Apply contrast stretch to RAW values before converting to grayscale
+                    const rawRange = rawMax - rawMin;
+                    if (rawRange > 0) {
+                        gray = Math.floor(((x - rawMin) / rawRange) * 255);
+                    } else {
+                        gray = (x * inv * 255) | 0;
+                    }
                 } 
                 else if (mode === 'bit') {
                     gray = ((x >>> bitPlaneIndex) & 1) * 255;
@@ -357,12 +393,22 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
                 }
             }
             
-            // Apply contrast stretch
-            const useMin = contrastStretch.auto ? minVal : contrastStretch.min;
-            const useMax = contrastStretch.auto ? maxVal : contrastStretch.max;
+            // Apply contrast stretch (for non-raw modes, raw already handled)
+            // For raw mode, contrast stretch was already applied above
+            const useMin = (mode === 'raw') ? 0 : (contrastStretch.auto ? minVal : contrastStretch.min);
+            const useMax = (mode === 'raw') ? 255 : (contrastStretch.auto ? maxVal : contrastStretch.max);
             const range = useMax - useMin;
             
-            if (range > 0) {
+            if (mode === 'raw') {
+                // Raw mode already has contrast applied, just copy to buffer
+                for (let i = 0; i < totalPixels; i++) {
+                    const pIdx = i << 2;
+                    buffer[pIdx] = tempGray[i];
+                    buffer[pIdx + 1] = tempGray[i];
+                    buffer[pIdx + 2] = tempGray[i];
+                    buffer[pIdx + 3] = 255;
+                }
+            } else if (range > 0) {
                 for (let i = 0; i < totalPixels; i++) {
                     const stretched = ((tempGray[i] - useMin) * 255) / range;
                     const pIdx = i << 2;
