@@ -144,14 +144,17 @@ function App() {
             const canvas = canvasLeftRef.current;
             const container = canvas.parentElement;
             if (container) {
-                const scaledWidth = canvas.width * leftPanel.scale;
-                const scaledHeight = canvas.height * leftPanel.scale;
-                canvas.style.position = 'absolute';
+                // Use transform instead of absolute positioning to respect overflow
+                canvas.style.position = 'relative';
                 canvas.style.margin = '0';
-                canvas.style.left = `${(container.clientWidth - scaledWidth) / 2 + leftPanel.pan.x}px`;
-                canvas.style.top = `${(container.clientHeight - scaledHeight) / 2 + leftPanel.pan.y}px`;
-                canvas.style.width = `${scaledWidth}px`;
-                canvas.style.height = `${scaledHeight}px`;
+                const translateX = leftPanel.pan.x;
+                const translateY = leftPanel.pan.y;
+                canvas.style.transform = `translate(${translateX}px, ${translateY}px) scale(${leftPanel.scale})`;
+                canvas.style.transformOrigin = 'center center';
+                canvas.style.left = '50%';
+                canvas.style.top = '50%';
+                canvas.style.marginLeft = `${-canvas.width / 2}px`;
+                canvas.style.marginTop = `${-canvas.height / 2}px`;
             }
         }
     }, [leftPanel.scale, leftPanel.pan, sideBySideMode]);
@@ -161,14 +164,17 @@ function App() {
             const canvas = canvasRightRef.current;
             const container = canvas.parentElement;
             if (container) {
-                const scaledWidth = canvas.width * rightPanel.scale;
-                const scaledHeight = canvas.height * rightPanel.scale;
-                canvas.style.position = 'absolute';
+                // Use transform instead of absolute positioning to respect overflow
+                canvas.style.position = 'relative';
                 canvas.style.margin = '0';
-                canvas.style.left = `${(container.clientWidth - scaledWidth) / 2 + rightPanel.pan.x}px`;
-                canvas.style.top = `${(container.clientHeight - scaledHeight) / 2 + rightPanel.pan.y}px`;
-                canvas.style.width = `${scaledWidth}px`;
-                canvas.style.height = `${scaledHeight}px`;
+                const translateX = rightPanel.pan.x;
+                const translateY = rightPanel.pan.y;
+                canvas.style.transform = `translate(${translateX}px, ${translateY}px) scale(${rightPanel.scale})`;
+                canvas.style.transformOrigin = 'center center';
+                canvas.style.left = '50%';
+                canvas.style.top = '50%';
+                canvas.style.marginLeft = `${-canvas.width / 2}px`;
+                canvas.style.marginTop = `${-canvas.height / 2}px`;
             }
         }
     }, [rightPanel.scale, rightPanel.pan, sideBySideMode]);
