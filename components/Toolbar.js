@@ -153,6 +153,25 @@ function Toolbar({
                                 </div>
                             )}
                         </div>
+                        
+                        {/* Mapping Mode */}
+                        <div>
+                            <label className="block text-xs mb-1 text-gray-400">Value Mapping:</label>
+                            <select 
+                                value={panel.mappingMode || 'linear'}
+                                onChange={(e) => onUpdatePanel({ mappingMode: e.target.value })}
+                                className="w-full px-2 py-1.5 bg-lab-800 hover:bg-lab-700 rounded text-xs transition-colors"
+                            >
+                                <option value="linear">Linear</option>
+                                <option value="log">Logarithmic</option>
+                                <option value="rank">Rank Order</option>
+                            </select>
+                            <div className="text-[10px] text-gray-500 mt-1">
+                                {(panel.mappingMode === 'linear' || !panel.mappingMode) && 'Direct proportional mapping'}
+                                {panel.mappingMode === 'log' && 'Emphasizes small values'}
+                                {panel.mappingMode === 'rank' && 'Maps by sort position'}
+                            </div>
+                        </div>
                     </div>
                 )}
             </div>
@@ -197,6 +216,15 @@ function Toolbar({
                 }`}
             >
                 {panel.isGenerating ? 'Gen...' : 'Generate'}
+            </button>
+            
+            {/* Info Button */}
+            <button 
+                onClick={() => onUpdatePanel({ showModeDescription: !panel.showModeDescription })}
+                className="px-2 py-1 bg-lab-700 hover:bg-lab-600 rounded text-xs transition-colors"
+                title="Mode Information"
+            >
+                📖 Info
             </button>
         </div>
     );

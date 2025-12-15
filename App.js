@@ -26,6 +26,7 @@ function App() {
     const [showPresetsDropdown, setShowPresetsDropdown] = useState(false);
     const [showContrastDropdown, setShowContrastDropdown] = useState(false);
     const [showSyntaxHelper, setShowSyntaxHelper] = useState(false);
+    const [mappingMode, setMappingMode] = useState('linear');
     
     const [scale, setScale] = useState(1);
     const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -40,6 +41,7 @@ function App() {
         bitIndex: 0,
         builtInGenerator: '',
         contrastStretch: { enabled: false, auto: true, min: 0, max: 255 },
+        mappingMode: 'linear',
         scale: 1,
         pan: { x: 0, y: 0 },
         showMenu: false,
@@ -58,6 +60,7 @@ function App() {
         mode: "raw",
         bitIndex: 0,
         builtInGenerator: '',
+        mappingMode: 'linear',
         contrastStretch: { enabled: false, auto: true, min: 0, max: 255 },
         scale: 1,
         pan: { x: 0, y: 0 },
@@ -219,6 +222,7 @@ function App() {
             mode,
             bitPlaneIndex: parseInt(bitIndex),
             contrastStretch,
+            mappingMode,
             useBuiltIn: !!builtInGenerator,
             builtInType: builtInGenerator
         };
@@ -466,6 +470,7 @@ function App() {
             mode: panel.mode,
             bitPlaneIndex: parseInt(panel.bitIndex),
             contrastStretch: panel.contrastStretch,
+            mappingMode: panel.mappingMode,
             useBuiltIn: !!panel.builtInGenerator,
             builtInType: panel.builtInGenerator
         };

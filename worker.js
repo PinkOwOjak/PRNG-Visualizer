@@ -3,7 +3,7 @@
 // ==========================================
 
 self.onmessage = function(e) {
-    const { equation, seed, resolution, mode, bitPlaneIndex, contrastStretch, useBuiltIn, builtInType } = e.data;
+    const { equation, seed, resolution, mode, bitPlaneIndex, contrastStretch, mappingMode, useBuiltIn, builtInType } = e.data;
     
     try {
         let finalEquation = equation;
@@ -11,7 +11,7 @@ self.onmessage = function(e) {
             finalEquation = builtInType;
         }
         
-        const result = generateImage(finalEquation, seed, resolution, mode, bitPlaneIndex, contrastStretch, true);
+        const result = generateImage(finalEquation, seed, resolution, mode, bitPlaneIndex, contrastStretch, mappingMode, true);
         
         self.postMessage({ 
             success: true, 
@@ -204,8 +204,9 @@ function badGenerator2(x) {
     return (x * 2) >>> 0;
 }
 
-function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, onProgress) {
+function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, mappingMode, onProgress) {
     const totalPixels = res * res;
+    mappingMode = mappingMode || 'linear'; // Default to linear if not provided
     
     // Check if using built-in generator
     const builtInGenerators = {
@@ -239,17 +240,19 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
         const density = new Uint32Array(totalPixels);
         let maxHits = 0;
         
+        let prev_x = x;
+        
         for (let i = 0; i < totalPixels; i++) {
             x = isBuiltIn ? generatorFunc(x) : evaluateRPN(rpn, x);
             
-            const px = (seed >>> 0) % res;
+            const px = prev_x % res;
             const py = x % res;
             
             const idx = (py * res) + px;
             density[idx]++;
             if (density[idx] > maxHits) maxHits = density[idx];
             
-            seed = x;
+            prev_x = x;
             
             if (onProgress && i % progressReportInterval === 0) {
                 self.postMessage({ type: 'progress', progress: (i / totalPixels) * 100 });
@@ -279,9 +282,12 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
         const inv = 1 / 4294967296;
         let minVal = 255, maxVal = 0;
         
-        // Fast path: single-pass when contrast stretch is disabled
-        if (!contrastStretch || !contrastStretch.enabled) {
-            console.log('[generateImage] Taking FAST path (no contrast stretch)');
+        // Fast path: single-pass when contrast stretch is disabled AND rank mode is not used
+        // Rank mode requires two passes (collect + sort), so it must use slow path
+        const needsSlowPath = (contrastStretch && contrastStretch.enabled) || (mappingMode === 'rank');
+        
+        if (!needsSlowPath) {
+            console.log('[generateImage] Taking FAST path (no contrast stretch, no rank mode)');
             for (let i = 0; i < totalPixels; i++) {
                 x = isBuiltIn ? generatorFunc(x) : evaluateRPN(rpn, x);
                 
@@ -292,7 +298,13 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
                 let gray = 0;
                 
                 if (mode === 'raw') {
-                    gray = (x * inv * 255) | 0;
+                    if (mappingMode === 'log') {
+                        // Logarithmic mapping: log2(x+1) / 32 * 255
+                        gray = Math.floor(Math.log2(x + 1) / 32 * 255);
+                    } else {
+                        // Linear mapping (rank handled in slow path)
+                        gray = (x * inv * 255) | 0;
+                    }
                 } 
                 else if (mode === 'bit') {
                     gray = ((x >>> bitPlaneIndex) & 1) * 255;
@@ -303,7 +315,8 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
                 } 
                 else if (mode === 'transition') {
                     const diff = x ^ prev_x;
-                    gray = Math.floor((diff >>> 0) / 4294967296 * 255);
+                    const changedBits = popcount(diff);   // 0–32
+                    gray = Math.floor((changedBits / 32) * 255);
                     prev_x = x;
                 }
                 
@@ -343,13 +356,40 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
                 }
             }
             
-            // Second pass: Find min/max from RAW values (for contrast stretch in raw mode)
-            let rawMin = 0xFFFFFFFF, rawMax = 0;
+            // Second pass: Prepare for mapping mode
+            let mappedValues = new Float32Array(totalPixels);
+            
             if (mode === 'raw') {
-                for (let i = 0; i < totalPixels; i++) {
-                    const val = rawValues[i];
-                    if (val < rawMin) rawMin = val;
-                    if (val > rawMax) rawMax = val;
+                if (mappingMode === 'linear') {
+                    // Linear: normalize to [0, 1]
+                    let rawMin = 0xFFFFFFFF, rawMax = 0;
+                    for (let i = 0; i < totalPixels; i++) {
+                        const val = rawValues[i];
+                        if (val < rawMin) rawMin = val;
+                        if (val > rawMax) rawMax = val;
+                    }
+                    const rawRange = rawMax - rawMin;
+                    for (let i = 0; i < totalPixels; i++) {
+                        mappedValues[i] = rawRange > 0 ? (rawValues[i] - rawMin) / rawRange : 0;
+                    }
+                } else if (mappingMode === 'log') {
+                    // Logarithmic: log2(x+1) normalized by log2(2^32) = 32
+                    for (let i = 0; i < totalPixels; i++) {
+                        mappedValues[i] = Math.log2(rawValues[i] + 1) / 32;
+                    }
+                } else if (mappingMode === 'rank') {
+                    // Rank: sort and map by position
+                    const sorted = rawValues.slice().sort((a, b) => a - b);
+                    const rankMap = new Map();
+                    const divisor = totalPixels > 1 ? totalPixels - 1 : 1;
+                    for (let i = 0; i < sorted.length; i++) {
+                        if (!rankMap.has(sorted[i])) {
+                            rankMap.set(sorted[i], i / divisor);
+                        }
+                    }
+                    for (let i = 0; i < totalPixels; i++) {
+                        mappedValues[i] = rankMap.get(rawValues[i]);
+                    }
                 }
             }
             
@@ -363,13 +403,9 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
                 let gray = 0;
                 
                 if (mode === 'raw') {
-                    // Apply contrast stretch to RAW values before converting to grayscale
-                    const rawRange = rawMax - rawMin;
-                    if (rawRange > 0) {
-                        gray = Math.floor(((x - rawMin) / rawRange) * 255);
-                    } else {
-                        gray = (x * inv * 255) | 0;
-                    }
+                    // Use the pre-mapped normalized value [0, 1]
+                    const normalized = mappedValues[i];
+                    gray = Math.floor(normalized * 255);
                 } 
                 else if (mode === 'bit') {
                     gray = ((x >>> bitPlaneIndex) & 1) * 255;
@@ -380,7 +416,8 @@ function generateImage(eqStr, seed, res, mode, bitPlaneIndex, contrastStretch, o
                 } 
                 else if (mode === 'transition') {
                     const diff = x ^ prev_x;
-                    gray = Math.floor((diff >>> 0) / 4294967296 * 255);
+                    const changedBits = popcount(diff);   // 0–32
+                    gray = Math.floor((changedBits / 32) * 255);
                     prev_x = x;
                 }
                 
