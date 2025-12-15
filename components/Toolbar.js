@@ -153,25 +153,6 @@ function Toolbar({
                                 </div>
                             )}
                         </div>
-                        
-                        {/* Mapping Mode */}
-                        <div>
-                            <label className="block text-xs mb-1 text-gray-400">Value Mapping:</label>
-                            <select 
-                                value={panel.mappingMode || 'linear'}
-                                onChange={(e) => onUpdatePanel({ mappingMode: e.target.value })}
-                                className="w-full px-2 py-1.5 bg-lab-800 hover:bg-lab-700 rounded text-xs transition-colors"
-                            >
-                                <option value="linear">Linear</option>
-                                <option value="log">Logarithmic</option>
-                                <option value="rank">Rank Order</option>
-                            </select>
-                            <div className="text-[10px] text-gray-500 mt-1">
-                                {(panel.mappingMode === 'linear' || !panel.mappingMode) && 'Direct proportional mapping'}
-                                {panel.mappingMode === 'log' && 'Emphasizes small values'}
-                                {panel.mappingMode === 'rank' && 'Maps by sort position'}
-                            </div>
-                        </div>
                     </div>
                 )}
             </div>
@@ -204,8 +185,20 @@ function Toolbar({
                 <option value="512">512</option>
                 <option value="1024">1024</option>
             </select>
-            
-            {/* Generate Button */}
+                        {/* Value Mapping (Raw mode only) */}
+            {panel.mode === 'raw' && (
+                <select 
+                    value={panel.mappingMode || 'linear'}
+                    onChange={(e) => onUpdatePanel({ mappingMode: e.target.value })}
+                    className="bg-lab-900 border border-lab-700 rounded px-2 py-1 text-xs"
+                    title="Value Mapping"
+                >
+                    <option value="linear">Linear</option>
+                    <option value="log">Log</option>
+                    <option value="rank">Rank</option>
+                </select>
+            )}
+                        {/* Generate Button */}
             <button 
                 onClick={onGenerate}
                 disabled={panel.isGenerating}

@@ -801,6 +801,22 @@ function App() {
                         </div>
                     </div>
                     
+                    {/* Value Mapping (Raw mode only) */}
+                    {mode === 'raw' && (
+                        <div>
+                            <label className="text-[10px] text-gray-500 block">Value Mapping</label>
+                            <select 
+                                value={mappingMode}
+                                onChange={(e) => setMappingMode(e.target.value)}
+                                className="bg-lab-900 border border-lab-700 rounded px-2 py-1 text-sm"
+                            >
+                                <option value="linear">Linear</option>
+                                <option value="log">Logarithmic</option>
+                                <option value="rank">Rank Order</option>
+                            </select>
+                        </div>
+                    )}
+                    
                     <button 
                         onClick={() => setShowSyntaxHelper(!showSyntaxHelper)}
                         className="px-3 py-2 bg-lab-700 hover:bg-lab-600 rounded text-xs transition-colors"
